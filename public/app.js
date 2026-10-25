@@ -5,8 +5,9 @@ let authMode = 'register';
 let currentUser = null;
 let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'Manual activation after administrator review', assistantConfigured: false, paymentsConfigured: false, manualApprovalEnabled: true };
 let busy = false;
-let currentReasoningLevel = 'low';
-let reasoningSavePromise = Promise.resolve();
+let currentPreferences = { thinkingMode: 'auto', thinkingBudget: 8192, outputTarget: 5000 };
+let preferencesSavePromise = Promise.resolve();
+let preferencesSaving = false;
 
 $('year').textContent = new Date().getFullYear();
 
@@ -195,41 +196,146 @@ function renderUser() {
     setView('membership');
   }
 }
-function normalizeReasoningLevel(level) {
-  return ['low', 'medium', 'high', 'xhigh'].includes(String(level).toLowerCase()) ? String(level).toLowerCase() : 'low';
+function normalizeThinkingMode(mode) { return mode === 'budget' ? 'budget' : 'auto'; }
+function normalizeThinkingBudget(value) { const n = Number(value); return [4096, 8192, 16384, 24576, 32768].includes(n) ? n : 8192; }
+function normalizeOutputTarget(value) { const n = Number(value); return [2000, 5000, 10000, 20000].includes(n) ? n : 5000; }
+function readPreferenceControls() {
+  return {
+    thinkingMode: $('thinkingBudgetEnabled').checked ? 'budget' : 'auto',
+    thinkingBudget: normalizeThinkingBudget($('thinkingBudget').value),
+    outputTarget: normalizeOutputTarget($('longAnswerTarget').value)
+  };
 }
-async function loadReasoningPreference() {
+function refreshThinkingBudgetEnabled() {
+  $('thinkingBudget').disabled = !$('thinkingBudgetEnabled').checked || preferencesSaving;
+  $('thinkingBudgetEnabled').disabled = preferencesSaving;
+  $('longAnswerTarget').disabled = preferencesSaving;
+}
+async function loadUserPreferences() {
   try {
     const data = await request('/api/user/preferences');
-    currentReasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
-    $('userReasoningLevel').value = currentReasoningLevel;
-    $('reasoningSaveStatus').textContent = 'Saved';
-    $('reasoningLevelHelp').textContent = data.note || 'Choose a thinking level for your requests.';
+    currentPreferences = {
+      thinkingMode: normalizeThinkingMode(data.thinkingMode),
+      thinkingBudget: normalizeThinkingBudget(data.thinkingBudget),
+      outputTarget: normalizeOutputTarget(data.outputTarget)
+    };
+    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingMode === 'budget';
+    $('thinkingBudget').value = String(currentPreferences.thinkingBudget);
+    $('longAnswerTarget').value = String(currentPreferences.outputTarget);
+    $('preferencesSaveStatus').textContent = 'Saved';
+    $('generationSettingsHelp').textContent = data.note || 'Automatic thinking uses dynamic budget. Custom budget is applied when enabled.';
   } catch (err) {
-    $('reasoningSaveStatus').textContent = 'Default';
-    $('reasoningLevelHelp').textContent = 'The account default will be used if your preference cannot be loaded.';
+    $('preferencesSaveStatus').textContent = 'Default';
+    $('generationSettingsHelp').textContent = 'Preferences will use the defaults until the account settings can be loaded.';
+  }
+  refreshThinkingBudgetEnabled();
+}
+async function saveUserPreferences() {
+  if (preferencesSaving) return;
+  const desired = readPreferenceControls();
+  preferencesSaving = true;
+  $('preferencesSaveStatus').textContent = 'Saving…';
+  refreshThinkingBudgetEnabled();
+  preferencesSavePromise = request('/api/user/preferences', {
+    method: 'PATCH', body: JSON.stringify(desired)
+  }).then(data => {
+    currentPreferences = {
+      thinkingMode: normalizeThinkingMode(data.thinkingMode),
+      thinkingBudget: normalizeThinkingBudget(data.thinkingBudget),
+      outputTarget: normalizeOutputTarget(data.outputTarget)
+    };
+    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingMode === 'budget';
+    $('thinkingBudget').value = String(currentPreferences.thinkingBudget);
+    $('longAnswerTarget').value = String(currentPreferences.outputTarget);
+    $('preferencesSaveStatus').textContent = 'Saved';
+  }).catch(err => {
+    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingMode === 'budget';
+    $('thinkingBudget').value = String(currentPreferences.thinkingBudget);
+    $('longAnswerTarget').value = String(currentPreferences.outputTarget);
+    $('preferencesSaveStatus').textContent = 'Save failed';
+    showGlobal(err.message || 'Could not save your preferences.', true);
+  }).finally(() => {
+    preferencesSaving = false;
+    refreshThinkingBudgetEnabled();
+  });
+  await preferencesSavePromise;
+}
+$('thinkingBudgetEnabled').addEventListener('change', () => {
+  refreshThinkingBudgetEnabled();
+  saveUserPreferences();
+});
+$('thinkingBudget').addEventListener('change', saveUserPreferences);
+$('longAnswerTarget').addEventListener('change', saveUserPreferences);
+
+const skillsDialog = $('skillsDialog');
+function renderUserSkills(skills, maxSkills = 20) {
+  const list = $('userSkillsList');
+  list.replaceChildren();
+  const entries = Array.isArray(skills) ? skills : [];
+  $('skillCount').textContent = `${entries.length}/${maxSkills}`;
+  if (!entries.length) {
+    const empty = document.createElement('p'); empty.className = 'skills-empty'; empty.textContent = 'No custom skills yet.'; list.append(empty); return;
+  }
+  for (const skill of entries) {
+    const row = document.createElement('article'); row.className = 'user-skill-row';
+    const info = document.createElement('div'); info.className = 'user-skill-info';
+    const name = document.createElement('strong'); name.textContent = skill.name || skill.id;
+    const desc = document.createElement('p'); desc.textContent = skill.description || 'Personal OpenCode skill';
+    const id = document.createElement('code'); id.textContent = `@${skill.id}`;
+    info.append(name, desc, id);
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'skill-remove-button'; remove.textContent = 'Remove';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`Remove skill “${skill.name || skill.id}”?`)) return;
+      remove.disabled = true;
+      try {
+        await request(`/api/user/skills/${encodeURIComponent(skill.id)}`, { method: 'DELETE' });
+        await loadUserSkills();
+        request('/api/chat/warmup', { method: 'POST', body: '{}' }).catch(() => {});
+        $('skillSaveStatus').textContent = 'Skill removed. OpenCode is refreshing your skill catalog.';
+      } catch (err) { $('skillSaveStatus').textContent = err.message || 'Could not remove skill.'; }
+      finally { remove.disabled = false; }
+    });
+    row.append(info, remove); list.append(row);
   }
 }
-$('userReasoningLevel').addEventListener('change', () => {
-  const selected = normalizeReasoningLevel($('userReasoningLevel').value);
-  $('reasoningSaveStatus').textContent = 'Saving…';
-  const select = $('userReasoningLevel'); select.disabled = true;
-  reasoningSavePromise = request('/api/user/preferences', {
-    method: 'PATCH', body: JSON.stringify({ reasoningLevel: selected })
-  }).then(data => {
-    currentReasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
-    select.value = currentReasoningLevel;
-    $('reasoningSaveStatus').textContent = 'Saved';
-  }).catch(err => {
-    select.value = currentReasoningLevel;
-    $('reasoningSaveStatus').textContent = 'Save failed';
-    showGlobal(err.message || 'Could not save your thinking level.', true);
-  }).finally(() => { select.disabled = false; });
+async function loadUserSkills() {
+  try {
+    const data = await request('/api/user/skills');
+    renderUserSkills(data.skills, data.maxSkills || 20);
+  } catch (err) {
+    $('userSkillsList').textContent = err.message || 'Could not load skills.';
+  }
+}
+$('manageSkills').addEventListener('click', async () => {
+  if (!skillsDialog.open) skillsDialog.showModal();
+  $('skillSaveStatus').textContent = 'Loading your private skills…';
+  await loadUserSkills();
+  $('skillSaveStatus').textContent = 'Skills are private to your account.';
+});
+$('closeSkillsDialog').addEventListener('click', () => skillsDialog.close());
+skillsDialog.addEventListener('click', event => { if (event.target === skillsDialog) skillsDialog.close(); });
+$('skillForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('saveSkill'); button.disabled = true;
+  $('skillSaveStatus').textContent = 'Saving skill…';
+  try {
+    const data = await request('/api/user/skills', { method: 'POST', body: JSON.stringify({
+      name: $('skillName').value.trim(),
+      description: $('skillDescription').value.trim(),
+      instructions: $('skillInstructions').value.trim()
+    }) });
+    $('skillForm').reset();
+    await loadUserSkills();
+    $('skillSaveStatus').textContent = data.message || 'Skill saved.';
+    request('/api/chat/warmup', { method: 'POST', body: '{}' }).catch(() => {});
+  } catch (err) {
+    $('skillSaveStatus').textContent = err.message || 'Could not save skill.';
+  } finally { button.disabled = false; }
 });
 
 async function loadHistory() {
   const box = $('chatMessages');
-  await loadReasoningPreference();
+  await Promise.all([loadUserPreferences(), loadUserSkills()]);
   box.innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>Your workspace is ready</h3><p>Enter a coding task or upload project files to work on in your private workspace.</p></div>';
   // Start the worker before waiting for the history fetch, so users who pause
   // to read old messages arrive at a warm OpenCode process.
@@ -374,11 +480,10 @@ $('chatForm').addEventListener('submit', async event => {
   if (!text) return;
   busy = true; $('chatInput').disabled = true; $('sendButton').disabled = true; hide($('chatError'));
   addMessage('user', text); $('chatInput').value = ''; resizeComposer();
-  const selectedReasoningLevel = normalizeReasoningLevel($('userReasoningLevel').value);
   const thinking = startThinkingIndicator();
   try {
-    await reasoningSavePromise;
-    const data = await request('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, reasoningLevel: selectedReasoningLevel }) });
+    await preferencesSavePromise;
+    const data = await request('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
     const clientDurationMs = thinking.stop();
     const metadata = {
       durationMs: Number.isFinite(Number(data.durationMs)) ? Number(data.durationMs) : clientDurationMs,

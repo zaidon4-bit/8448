@@ -73,7 +73,6 @@ async function loadGlobalSettings() {
   const data = await api('/api/admin/settings');
   $('systemPrompt').value = data.systemPrompt || '';
   defaultSystemPrompt = data.defaultSystemPrompt || data.systemPrompt || '';
-  $('reasoningLevel').value = ['low', 'medium', 'high'].includes(data.reasoningLevel) ? data.reasoningLevel : 'low';
   globalSettingsLoaded = true;
 }
 $('globalSettingsForm').addEventListener('submit', async event => {
@@ -84,7 +83,7 @@ $('globalSettingsForm').addEventListener('submit', async event => {
   try {
     const data = await api('/api/admin/settings', {
       method: 'PATCH',
-      body: JSON.stringify({ systemPrompt: $('systemPrompt').value, reasoningLevel: $('reasoningLevel').value })
+      body: JSON.stringify({ systemPrompt: $('systemPrompt').value })
     });
     notice(data.promptUpdated ? 'Assistant settings saved. Active workers were restarted to load the new System Prompt.' : 'Assistant settings saved.');
     await loadGlobalSettings();

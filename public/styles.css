@@ -128,3 +128,44 @@ body.in-workspace .reasoning-control-row select:disabled{opacity:.6}
 body.in-workspace #reasoningSaveStatus{font-size:9px;color:#6e829f}
 body.in-workspace .reasoning-level-help{margin:0;padding:0 2px 3px;font-size:9px;line-height:1.5;color:#65748e}
 @media(max-width:420px){body.in-workspace .reasoning-control-row{gap:6px}body.in-workspace .reasoning-control-row select{font-size:9px;padding:5px 6px}}
+
+
+/* Per-user generation options and personal OpenCode skills dialog. */
+body.in-workspace .generation-controls{display:grid;gap:7px;padding:6px 2px 3px;border-top:1px solid rgba(255,255,255,.04)}
+body.in-workspace .generation-control-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:26px;color:#8d9bb5;font-size:10px}
+body.in-workspace .generation-control-row>label:not(.thinking-budget-toggle){color:#9eabc1;white-space:nowrap}
+body.in-workspace .generation-control-row select{max-width:100%;border:1px solid #2a354d;background:#101827;color:#d9e4f7;border-radius:8px;padding:6px 8px;font-size:10px;outline:none}
+body.in-workspace .generation-control-row select:focus{border-color:#638bf0}
+body.in-workspace .generation-control-row select:disabled{opacity:.5}
+body.in-workspace .thinking-budget-toggle{display:flex;align-items:center;gap:6px;min-width:0;color:#9eabc1;cursor:pointer}
+body.in-workspace .thinking-budget-toggle input{accent-color:#8ba5ff;width:13px;height:13px;margin:0}
+body.in-workspace .generation-settings-help{margin:0;padding:0 2px 1px;font-size:9px;line-height:1.5;color:#65748e}
+body.in-workspace #preferencesSaveStatus{font-size:9px;color:#6e829f}
+body.in-workspace .skills-tool{font-size:11px;white-space:nowrap;width:auto;padding:0 8px;gap:4px}
+.skills-dialog{width:min(620px,calc(100vw - 22px));max-height:min(88vh,840px);padding:0;border:1px solid #2d3b56;border-radius:18px;background:#0b111d;color:#e6ecf8;box-shadow:0 25px 100px #000a}
+.skills-dialog::backdrop{background:rgba(2,5,12,.78);backdrop-filter:blur(6px)}
+.skills-dialog-inner{padding:20px;display:grid;gap:18px;max-height:inherit;overflow:auto}
+.skills-dialog-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.skills-dialog-heading h2{margin:0 0 6px;font-size:19px}
+.skills-dialog-heading p{margin:0;color:#8290aa;font-size:11px;line-height:1.7}
+.skill-form{display:grid;gap:12px}
+.skill-form label{display:grid;gap:6px;color:#a9b6ce;font-size:11px}
+.skill-form input,.skill-form textarea{width:100%;box-sizing:border-box;border:1px solid #2b3852;border-radius:10px;background:#080d16;color:#e8edf8;padding:11px 12px;outline:none;font:12px/1.65 'IBM Plex Sans',system-ui,sans-serif}
+.skill-form textarea{resize:vertical;min-height:120px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.skill-form input:focus,.skill-form textarea:focus{border-color:#6889e4;box-shadow:0 0 0 3px #5378d51c}
+.skills-form-bottom{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#7586a3;font-size:10px}
+.skills-form-bottom .send-button{width:auto;height:34px;padding:0 15px;font-size:11px}
+.skills-list-section h3{display:flex;justify-content:space-between;align-items:center;margin:0 0 10px;font-size:13px}
+.skills-list-section h3 span{color:#8090ad;font:10px 'IBM Plex Mono',monospace}
+.user-skills-list{display:grid;gap:8px}
+.skills-empty{margin:0;padding:17px;border:1px dashed #2b3852;border-radius:10px;color:#7888a4;text-align:center;font-size:11px}
+.user-skill-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px;border:1px solid #253149;border-radius:11px;background:#101827}
+.user-skill-info{min-width:0;display:grid;gap:4px}
+.user-skill-info strong{font-size:12px;overflow-wrap:anywhere}
+.user-skill-info p{margin:0;color:#8593ad;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.user-skill-info code{color:#89a8ff;font-size:10px}
+.skill-remove-button{flex:none;border:1px solid #673a49;background:#2a1720;color:#ffc1ca;border-radius:8px;padding:7px 9px;font-size:10px}
+.skill-remove-button:disabled{opacity:.5}
+@media(max-width:520px){body.in-workspace .generation-control-row{gap:5px}body.in-workspace .generation-control-row select{font-size:9px;padding:5px 6px}.skills-dialog-inner{padding:15px}.skills-dialog-heading h2{font-size:17px}.skills-form-bottom{align-items:flex-start;flex-direction:column}.user-skill-row{align-items:flex-start}}
+
+@media(max-width:520px){body.in-workspace .composer-left{flex-wrap:wrap}}

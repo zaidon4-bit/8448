@@ -70,3 +70,10 @@ When an active subscriber opens the workspace, the app starts OpenCode in the ba
 ## Subscriber reasoning controls
 
 Each subscribed user can choose Low, Medium, High, or XHigh from the chat composer. The setting is saved to that user’s account and is applied by the server-side provider proxy. The official Gemini 2.5 Pro OpenAI-compatible mapping documents Low, Medium, and High; XHigh is accepted by the application UI but maps to High for this model/API route, so it is not a distinct fourth Gemini 2.5 Pro effort level. Other providers may support different effort variants.
+
+
+## إعدادات التفكير والمهارات الشخصية
+
+بعد تسجيل الدخول وفتح مساحة العمل، يستطيع كل مستخدم اختيار Automatic Thinking أو تفعيل ميزانية Thinking Budget مستقلة، واختيار Long Answer Target. الميزانية التلقائية تُرسل كـ `thinking_budget: -1` في حقل توافق Google؛ أما الميزانيات اليدوية فتُمرر عبر `extra_body.google.thinking_config.thinking_budget`. يجب اختبار دعم هذا الحقل عبر بوابة الموديل المستخدمة. طول الرد المستهدف ليس حداً أدنى مضموناً.
+
+زر Skills يتيح إضافة مهارات OpenCode خاصة بالمستخدم عبر ملفات `SKILL.md`. المهارات محفوظة في مجلد HOME الخاص بالمستخدم ولا تُشارك بين الحسابات.

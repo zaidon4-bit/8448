@@ -66,6 +66,9 @@ db.exec(`
     ai_model_id TEXT,
     ai_api_key_encrypted TEXT,
     reasoning_level TEXT,
+    thinking_mode TEXT NOT NULL DEFAULT 'auto',
+    thinking_budget INTEGER NOT NULL DEFAULT 8192,
+    output_target INTEGER NOT NULL DEFAULT 5000,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS chat_messages (
@@ -86,6 +89,9 @@ for (const [name, definition] of Object.entries({
   ai_model_id: 'TEXT',
   ai_api_key_encrypted: 'TEXT',
   reasoning_level: 'TEXT',
+  thinking_mode: "TEXT NOT NULL DEFAULT 'auto'",
+  thinking_budget: 'INTEGER NOT NULL DEFAULT 8192',
+  output_target: 'INTEGER NOT NULL DEFAULT 5000',
   subscription_source: "TEXT NOT NULL DEFAULT 'manual'",
   subscription_requested_at: 'TEXT'
 })) {
@@ -114,7 +120,6 @@ function getAppSetting(key) {
 function setAppSetting(key, value) { setAppSettingStmt.run(key, String(value)); }
 const defaultSystemPrompt = fs.readFileSync(DEFAULT_SYSTEM_PROMPT_PATH, 'utf8').trim();
 if (getAppSetting('system_prompt') === null) setAppSetting('system_prompt', defaultSystemPrompt);
-if (!['low', 'medium', 'high'].includes(getAppSetting('reasoning_level'))) setAppSetting('reasoning_level', 'low');
 function syncRuntimeSystemPrompt() {
   const value = String(getAppSetting('system_prompt') || defaultSystemPrompt).trim();
   fs.writeFileSync(SYSTEM_PROMPT_PATH, `${value}\n`, { encoding: 'utf8', mode: 0o644 });
@@ -315,15 +320,50 @@ const proxyServer = http.createServer((req, res) => {
           // The browser/agent sees only a neutral model alias. The server maps
           // that alias to the privately configured upstream model.
           parsed.model = aiConfig.modelId;
-          // The subscriber chooses their own reasoning level. Gemini 2.5 Pro's
-          // documented OpenAI-compatible mapping exposes low/medium/high; XHigh
-          // remains a distinct saved UI preference but maps to the provider's
-          // highest documented effort (high) instead of sending an unsupported enum.
-          if (/gemini[\s_\/-]*2\.?5[\s_\/-]*pro/i.test(aiConfig.modelId)) {
-            const preferred = user && user.reasoning_level;
-            const fallback = getAppSetting('reasoning_level') || 'low';
-            const effort = ['low', 'medium', 'high', 'xhigh'].includes(preferred) ? preferred : fallback;
-            parsed.reasoning_effort = effort === 'xhigh' ? 'high' : (['low', 'medium', 'high'].includes(effort) ? effort : 'low');
+          // Per-user generation preferences. Google documents the OpenAI-compatible
+          // `extra_body.google.thinking_config.thinking_budget` extension for Gemini 2.5.
+          // -1 keeps dynamic thinking; an explicit budget uses the selected target.
+          const thinkingMode = user && user.thinking_mode === 'budget' ? 'budget' : 'auto';
+          const allowedBudgets = [4096, 8192, 16384, 24576, 32768];
+          const thinkingBudget = allowedBudgets.includes(Number(user && user.thinking_budget))
+            ? Number(user.thinking_budget) : 8192;
+          const allowedOutputTargets = [2000, 5000, 10000, 20000];
+          const outputTarget = allowedOutputTargets.includes(Number(user && user.output_target))
+            ? Number(user.output_target) : 5000;
+          const isGemini25Pro = /gemini[\s_\/-]*2\.?5[\s_\/-]*pro/i.test(aiConfig.modelId);
+          const effectiveThinkingBudget = thinkingMode === 'budget' ? thinkingBudget : 8192;
+          if (isGemini25Pro) {
+            // Do not send reasoning_effort as well: Google documents these controls
+            // as overlapping. Gateways which support Google's OpenAI-compat layer
+            // should forward this provider-specific extension.
+            delete parsed.reasoning_effort;
+            parsed.extra_body = parsed.extra_body && typeof parsed.extra_body === 'object' && !Array.isArray(parsed.extra_body)
+              ? parsed.extra_body : {};
+            const google = parsed.extra_body.google && typeof parsed.extra_body.google === 'object'
+              ? parsed.extra_body.google : {};
+            const thinkingConfig = google.thinking_config && typeof google.thinking_config === 'object'
+              ? google.thinking_config : {};
+            parsed.extra_body.google = {
+              ...google,
+              thinking_config: { ...thinkingConfig, thinking_budget: thinkingMode === 'budget' ? thinkingBudget : -1 }
+            };
+          }
+          // Gemini's max-output limit includes thought tokens, so reserve room for
+          // both the selected user-facing answer target and the thinking budget.
+          // A target is guidance/allowance, never a guaranteed minimum response.
+          const maxAllowed = Math.min(65536, outputTarget + (isGemini25Pro ? effectiveThinkingBudget : 0));
+          if (Object.prototype.hasOwnProperty.call(parsed, 'max_completion_tokens')) {
+            parsed.max_completion_tokens = maxAllowed;
+            delete parsed.max_tokens;
+          } else {
+            parsed.max_tokens = maxAllowed;
+          }
+          const lengthInstruction = `User response-length preference: for substantial coding tasks, aim for approximately ${outputTarget.toLocaleString('en-US')} output tokens when needed for code, files, or a detailed explanation. This is a target/allowance, not a minimum guarantee. Keep greetings and simple questions concise; never pad the answer, invent content, or omit required implementation and verification.`;
+          if (Array.isArray(parsed.messages)) {
+            const systemMessage = parsed.messages.find(message => message && ['system', 'developer'].includes(message.role));
+            if (!systemMessage) parsed.messages.unshift({ role: 'system', content: lengthInstruction });
+            else if (typeof systemMessage.content === 'string') systemMessage.content += `\n\n${lengthInstruction}`;
+            else if (Array.isArray(systemMessage.content)) systemMessage.content.push({ type: 'text', text: lengthInstruction });
           }
           body = Buffer.from(JSON.stringify(parsed));
         } catch {
@@ -754,24 +794,17 @@ app.get('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({
     systemPrompt: getAppSetting('system_prompt') || defaultSystemPrompt,
-    defaultSystemPrompt,
-    reasoningLevel: getAppSetting('reasoning_level') || 'low',
-    reasoningNote: 'Reasoning effort is passed to Gemini 2.5 Pro through the OpenAI-compatible API when the configured model ID matches that family.'
+    defaultSystemPrompt
   });
 });
 app.patch('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
   const body = req.body || {};
   const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : null;
-  const reasoningLevel = String(body.reasoningLevel || '').trim().toLowerCase();
   if (systemPrompt !== null && (!systemPrompt || systemPrompt.length > 40000)) {
     return res.status(400).json({ error: 'System Prompt must contain 1 to 40,000 characters.' });
   }
-  if (!['low', 'medium', 'high'].includes(reasoningLevel) && body.reasoningLevel !== undefined) {
-    return res.status(400).json({ error: 'Reasoning level must be low, medium, or high.' });
-  }
   const previousPrompt = getAppSetting('system_prompt') || defaultSystemPrompt;
   if (systemPrompt !== null) setAppSetting('system_prompt', systemPrompt);
-  if (body.reasoningLevel !== undefined) setAppSetting('reasoning_level', reasoningLevel);
   try {
     if (systemPrompt !== null && systemPrompt !== previousPrompt) {
       syncRuntimeSystemPrompt();
@@ -784,7 +817,7 @@ app.patch('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
     return res.status(500).json({ error: 'Could not save the System Prompt to persistent storage.' });
   }
   res.set('Cache-Control', 'no-store');
-  res.json({ ok: true, reasoningLevel: getAppSetting('reasoning_level') || 'low', promptUpdated: systemPrompt !== null && systemPrompt !== previousPrompt });
+  res.json({ ok: true, promptUpdated: systemPrompt !== null && systemPrompt !== previousPrompt });
 });
 app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
   const users = db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status, subscription_source,
@@ -937,26 +970,167 @@ app.post('/api/billing/portal', requireAuth, (req, res) => {
   res.status(410).json({ error: 'Subscription management is handled manually by an administrator.' });
 });
 
+const ALLOWED_THINKING_BUDGETS = [4096, 8192, 16384, 24576, 32768];
+const ALLOWED_OUTPUT_TARGETS = [2000, 5000, 10000, 20000];
+function userPreferencePayload(user) {
+  return {
+    thinkingMode: user && user.thinking_mode === 'budget' ? 'budget' : 'auto',
+    thinkingBudget: ALLOWED_THINKING_BUDGETS.includes(Number(user && user.thinking_budget)) ? Number(user.thinking_budget) : 8192,
+    outputTarget: ALLOWED_OUTPUT_TARGETS.includes(Number(user && user.output_target)) ? Number(user.output_target) : 5000,
+    thinkingBudgets: ALLOWED_THINKING_BUDGETS,
+    outputTargets: ALLOWED_OUTPUT_TARGETS,
+    note: 'Automatic mode lets the model choose its reasoning budget. Custom thinking budgets depend on support from the configured model connection. Answer targets guide the response but cannot guarantee a minimum token count.'
+  };
+}
 app.get('/api/user/preferences', requireAuth, requireSubscription, (req, res) => {
   const user = selectUserById.get(req.authUser.id);
-  const reasoningLevel = ['low', 'medium', 'high', 'xhigh'].includes(user && user.reasoning_level)
-    ? user.reasoning_level
-    : (getAppSetting('reasoning_level') || 'low');
   res.set('Cache-Control', 'no-store');
-  res.json({
-    reasoningLevel,
-    reasoningLevels: ['low', 'medium', 'high', 'xhigh'],
-    note: 'XHigh maps to the configured provider’s highest supported effort when a separate XHigh mode is unavailable.'
-  });
+  res.json(userPreferencePayload(user));
 });
 app.patch('/api/user/preferences', requireAuth, requireSubscription, (req, res) => {
-  const reasoningLevel = String(req.body && req.body.reasoningLevel || '').trim().toLowerCase();
-  if (!['low', 'medium', 'high', 'xhigh'].includes(reasoningLevel)) {
-    return res.status(400).json({ error: 'Choose Low, Medium, High, or XHigh.' });
-  }
-  db.prepare('UPDATE users SET reasoning_level = ? WHERE id = ?').run(reasoningLevel, req.authUser.id);
+  const body = req.body || {};
+  const user = selectUserById.get(req.authUser.id);
+  const thinkingMode = body.thinkingMode === undefined
+    ? (user && user.thinking_mode === 'budget' ? 'budget' : 'auto')
+    : String(body.thinkingMode).trim().toLowerCase();
+  const thinkingBudget = body.thinkingBudget === undefined
+    ? (ALLOWED_THINKING_BUDGETS.includes(Number(user && user.thinking_budget)) ? Number(user.thinking_budget) : 8192)
+    : Number(body.thinkingBudget);
+  const outputTarget = body.outputTarget === undefined
+    ? (ALLOWED_OUTPUT_TARGETS.includes(Number(user && user.output_target)) ? Number(user.output_target) : 5000)
+    : Number(body.outputTarget);
+  if (!['auto', 'budget'].includes(thinkingMode)) return res.status(400).json({ error: 'Thinking mode must be auto or budget.' });
+  if (!ALLOWED_THINKING_BUDGETS.includes(thinkingBudget)) return res.status(400).json({ error: 'Choose a supported thinking budget.' });
+  if (!ALLOWED_OUTPUT_TARGETS.includes(outputTarget)) return res.status(400).json({ error: 'Choose a supported long-answer target.' });
+  db.prepare('UPDATE users SET thinking_mode = ?, thinking_budget = ?, output_target = ? WHERE id = ?')
+    .run(thinkingMode, thinkingBudget, outputTarget, req.authUser.id);
+  const updated = selectUserById.get(req.authUser.id);
   res.set('Cache-Control', 'no-store');
-  res.json({ ok: true, reasoningLevel });
+  res.json({ ok: true, ...userPreferencePayload(updated) });
+});
+
+// User-created OpenCode skills are stored in each worker's private HOME, where
+// OpenCode automatically discovers ~/.config/opencode/skills/<id>/SKILL.md.
+function skillSlugFromName(name) {
+  return String(name || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48).replace(/-+$/g, '');
+}
+function resolveUserSkillRoot(homeDir, create = false, uid = null, gid = null) {
+  let current = homeDir;
+  for (const segment of ['.config', 'opencode', 'skills']) {
+    current = path.join(current, segment);
+    try {
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Unsafe user skill directory.');
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') throw err;
+      if (!create) return null;
+      fs.mkdirSync(current, { mode: 0o700 });
+      if (uid !== null && gid !== null) fs.chownSync(current, uid, gid);
+      fs.chmodSync(current, 0o700);
+    }
+  }
+  return current;
+}
+function readCustomSkills(homeDir) {
+  const root = resolveUserSkillRoot(homeDir, false);
+  if (!root) return [];
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^custom-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.name))
+    .map(entry => {
+      const directory = path.join(root, entry.name);
+      const directoryStat = fs.lstatSync(directory);
+      if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) return null;
+      const file = path.join(directory, 'SKILL.md');
+      let content;
+      try {
+        const fileStat = fs.lstatSync(file);
+        if (fileStat.isSymbolicLink() || !fileStat.isFile() || fileStat.size > 16000) return null;
+        content = fs.readFileSync(file, 'utf8');
+      } catch { return null; }
+      const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (!match) return null;
+      const field = key => {
+        const line = match[1].match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
+        if (!line) return '';
+        try { return JSON.parse(line[1]); } catch { return line[1].replace(/^['"]|['"]$/g, ''); }
+      };
+      return { id: entry.name, name: String(field('name') || entry.name), description: String(field('description') || ''), created: directoryStat.mtime.toISOString() };
+    }).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+}
+const skillChangeLimiter = rateLimit({ windowMs: 60 * 1000, limit: 12, standardHeaders: 'draft-7', legacyHeaders: false, keyGenerator: req => String(req.authUser.id) });
+app.get('/api/user/skills', requireAuth, requireSubscription, (req, res) => {
+  const homeDir = path.join(HOMES_DIR, String(req.authUser.id));
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json({ skills: readCustomSkills(homeDir), maxSkills: 20 });
+  } catch (err) {
+    console.error(`Unable to list skills for user ${req.authUser.id}: ${err.message}`);
+    res.status(500).json({ error: 'Could not load your skills safely.' });
+  }
+});
+app.post('/api/user/skills', requireAuth, requireSubscription, skillChangeLimiter, async (req, res) => {
+  const body = req.body || {};
+  const name = String(body.name || '').trim();
+  const description = String(body.description || '').trim();
+  const instructions = String(body.instructions || '').trim();
+  if (name.length < 2 || name.length > 60) return res.status(400).json({ error: 'Skill name must contain 2–60 characters.' });
+  if (description.length < 10 || description.length > 300) return res.status(400).json({ error: 'Skill description must contain 10–300 characters.' });
+  if (instructions.length < 20 || instructions.length > 12000) return res.status(400).json({ error: 'Skill instructions must contain 20–12,000 characters.' });
+  const slug = skillSlugFromName(name);
+  if (!slug || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return res.status(400).json({ error: 'Use an English name with letters or numbers so OpenCode can create a valid skill ID.' });
+  const user = selectUserById.get(req.authUser.id);
+  const existing = instances.get(user.id);
+  if (existing && existing.ready && existing.busy) return res.status(409).json({ error: 'Wait for the current coding task to finish before changing skills.' });
+  let instance;
+  try {
+    instance = await ensureOpenCodeForUser(user);
+    if (instance.ready && instance.busy) return res.status(409).json({ error: 'Wait for the current coding task to finish before changing skills.' });
+    const root = resolveUserSkillRoot(instance.homeDir, true, instance.uid, instance.gid);
+    const currentSkills = readCustomSkills(instance.homeDir);
+    if (currentSkills.length >= 20) return res.status(409).json({ error: 'You can save up to 20 custom skills.' });
+    const id = `custom-${slug}`;
+    const directory = path.join(root, id);
+    try { fs.lstatSync(directory); return res.status(409).json({ error: 'A skill with a similar name already exists.' }); }
+    catch (err) { if (!err || err.code !== 'ENOENT') throw err; }
+    fs.mkdirSync(directory, { mode: 0o700 });
+    fs.chownSync(directory, instance.uid, instance.gid); fs.chmodSync(directory, 0o700);
+    const file = path.join(directory, 'SKILL.md');
+    const content = `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\nmetadata:\n  version: "1"\n---\n\n${instructions}\n`;
+    const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+    try { fs.writeFileSync(fd, content, 'utf8'); } finally { fs.closeSync(fd); }
+    fs.chownSync(file, instance.uid, instance.gid); fs.chmodSync(file, 0o600);
+    // A running OpenCode server may have cached its skill catalog; restart the
+    // user's isolated worker so the newly added skill is loaded on next use.
+    stopInstance(user.id);
+    res.status(201).json({ ok: true, skill: { id, name, description }, message: 'Skill saved. OpenCode will reload your personal skills for the next task.' });
+  } catch (err) {
+    console.error(`Unable to create skill for user ${user.id}: ${String(err.message || err)}`);
+    res.status(500).json({ error: 'Could not save the skill. Please try again.' });
+  }
+});
+app.delete('/api/user/skills/:id', requireAuth, requireSubscription, skillChangeLimiter, (req, res) => {
+  const id = String(req.params.id || '');
+  if (!/^custom-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) return res.status(400).json({ error: 'Only your own custom skills can be removed.' });
+  const current = instances.get(req.authUser.id);
+  if (current && current.ready && current.busy) return res.status(409).json({ error: 'Wait for the current coding task to finish before changing skills.' });
+  const homeDir = path.join(HOMES_DIR, String(req.authUser.id));
+  try {
+    const root = resolveUserSkillRoot(homeDir, false);
+    if (!root) return res.status(404).json({ error: 'Skill not found.' });
+    const directory = path.join(root, id);
+    let stat;
+    try { stat = fs.lstatSync(directory); } catch (err) { if (err && err.code === 'ENOENT') return res.status(404).json({ error: 'Skill not found.' }); throw err; }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return res.status(400).json({ error: 'Invalid skill directory.' });
+    const skillFile = path.join(directory, 'SKILL.md');
+    try { if (fs.lstatSync(skillFile).isSymbolicLink()) return res.status(400).json({ error: 'Invalid skill file.' }); } catch (err) { if (err && err.code !== 'ENOENT') throw err; }
+    fs.rmSync(directory, { recursive: true, force: false });
+    stopInstance(req.authUser.id);
+    res.json({ ok: true, id, message: 'Skill removed. OpenCode will reload your skills for the next task.' });
+  } catch (err) {
+    console.error(`Unable to delete skill for user ${req.authUser.id}: ${String(err.message || err)}`);
+    res.status(500).json({ error: 'Could not remove the skill.' });
+  }
 });
 
 app.get('/api/chat/history', requireAuth, requireSubscription, (req, res) => {

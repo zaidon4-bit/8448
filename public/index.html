@@ -104,21 +104,34 @@
         <form id="chatForm" class="composer">
           <textarea id="chatInput" rows="1" maxlength="30000" placeholder="Describe what you want to build…" aria-label="Your message" required></textarea>
           <input id="projectFiles" type="file" multiple webkitdirectory directory hidden>
-          <div class="reasoning-control-row">
-            <label for="userReasoningLevel">Thinking level</label>
-            <select id="userReasoningLevel" aria-label="Thinking level">
-              <option value="low">Low · Faster responses</option>
-              <option value="medium">Medium · Balanced</option>
-              <option value="high">High · Deeper reasoning</option>
-              <option value="xhigh">XHigh · Maximum available</option>
-            </select>
-            <span id="reasoningSaveStatus" role="status">Default</span>
+          <div class="generation-controls" aria-label="Response settings">
+            <div class="generation-control-row">
+              <label class="thinking-budget-toggle" for="thinkingBudgetEnabled"><input id="thinkingBudgetEnabled" type="checkbox"><span>Use custom Thinking Budget</span></label>
+              <select id="thinkingBudget" aria-label="Thinking Budget" disabled>
+                <option value="4096">4,096 thinking tokens</option>
+                <option value="8192" selected>8,192 thinking tokens</option>
+                <option value="16384">16,384 thinking tokens</option>
+                <option value="24576">24,576 thinking tokens</option>
+                <option value="32768">32,768 thinking tokens</option>
+              </select>
+            </div>
+            <div class="generation-control-row">
+              <label for="longAnswerTarget">Long Answer Target</label>
+              <select id="longAnswerTarget" aria-label="Long Answer Target">
+                <option value="2000">2,000 tokens · Standard</option>
+                <option value="5000" selected>5,000 tokens · Detailed</option>
+                <option value="10000">10,000 tokens · Long</option>
+                <option value="20000">20,000 tokens · Very long</option>
+              </select>
+              <span id="preferencesSaveStatus" role="status">Default</span>
+            </div>
+            <p id="generationSettingsHelp" class="generation-settings-help">Automatic thinking is enabled when custom budget is off. Answer target is guidance, not a guaranteed minimum. Settings are saved to your account.</p>
           </div>
-          <p id="reasoningLevelHelp" class="reasoning-level-help">Choose how much reasoning to use for your requests. XHigh maps to the highest supported level when needed.</p>
           <div class="composer-bottom">
             <div class="composer-left">
               <button id="uploadFiles" class="composer-tool" type="button" title="Attach project files" aria-label="Attach project files">＋</button>
               <button id="downloadProject" class="composer-tool" type="button" title="Download project files" aria-label="Download project files">↓</button>
+              <button id="manageSkills" class="composer-tool skills-tool" type="button" title="Manage personal skills" aria-label="Manage personal skills">✧ Skills</button>
               <div class="composer-help">Enter to send · Shift + Enter for a new line</div>
             </div>
             <button id="sendButton" class="send-button" type="submit" aria-label="Send message" title="Send">↑</button>
@@ -127,6 +140,18 @@
         <div id="chatError" class="notice notice-error hidden" role="alert"></div>
       </section>
     </section>
+    <dialog id="skillsDialog" class="skills-dialog" aria-labelledby="skillsDialogTitle">
+      <div class="skills-dialog-inner">
+        <div class="skills-dialog-heading"><div><h2 id="skillsDialogTitle">Personal Skills</h2><p>Add reusable instructions that OpenCode can discover and load when relevant.</p></div><button id="closeSkillsDialog" class="composer-tool" type="button" aria-label="Close skills dialog">×</button></div>
+        <form id="skillForm" class="skill-form">
+          <label><span>Skill name</span><input id="skillName" type="text" minlength="2" maxlength="60" placeholder="e.g. React Code Review" required></label>
+          <label><span>Description</span><input id="skillDescription" type="text" minlength="10" maxlength="300" placeholder="When should OpenCode use this skill?" required></label>
+          <label><span>Instructions</span><textarea id="skillInstructions" rows="7" minlength="20" maxlength="12000" placeholder="Write the reusable workflow and rules for this skill…" required></textarea></label>
+          <div class="skills-form-bottom"><span id="skillSaveStatus" role="status">Skills are private to your account.</span><button id="saveSkill" class="send-button" type="submit">Add skill</button></div>
+        </form>
+        <section class="skills-list-section"><h3>Your skills <span id="skillCount">0/20</span></h3><div id="userSkillsList" class="user-skills-list"><p class="skills-empty">No custom skills yet.</p></div></section>
+      </div>
+    </dialog>
     <div id="globalNotice" class="global-notice hidden" role="status"></div>
   </main>
 

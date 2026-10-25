@@ -174,48 +174,58 @@ test('static assets use cache revalidation so a redeploy replaces stale UI', () 
   assert.match(server, /no-cache, must-revalidate/);
 });
 
-test('admin can edit the persisted global System Prompt and reasoning level', () => {
+test('admin controls only the global System Prompt, while users own generation preferences', () => {
   const server = read('server.js');
   const html = read('public/admin.html');
   const adminJs = read('public/admin.js');
-  assert.match(server, /CREATE TABLE IF NOT EXISTS app_settings/);
   assert.match(server, /app\.get\('\/api\/admin\/settings', requireAuth, requireAdmin/);
   assert.match(server, /app\.patch\('\/api\/admin\/settings', requireAuth, requireAdmin/);
   assert.match(server, /system_prompt/);
-  assert.match(server, /reasoning_level/);
   assert.match(html, /id="systemPrompt"/);
-  assert.match(html, /id="reasoningLevel"/);
-  assert.match(adminJs, /loadGlobalSettings/);
+  assert.doesNotMatch(html, /id="reasoningLevel"/);
+  assert.doesNotMatch(adminJs, /reasoningLevel/);
   assert.match(adminJs, /restoreDefaultPrompt/);
   assert.match(html, /Restore default prompt/);
 });
 
-test('admin reasoning setting remains the default for subscribers who have no personal preference', () => {
-  const server = read('server.js');
-  assert.match(server, /if \(!\['low', 'medium', 'high'\]\.includes\(getAppSetting\('reasoning_level'\)\)\) setAppSetting\('reasoning_level', 'low'\)/);
-  assert.match(server, /const fallback = getAppSetting\('reasoning_level'\) \|\| 'low'/);
-  assert.match(server, /test\(aiConfig\.modelId\)/);
-  assert.match(server, /gemini.*pro/i);
-});
-
-test('subscribers can save Low, Medium, High, and XHigh reasoning preferences', () => {
+test('per-user Thinking Budget supports dynamic mode and Google Gemini 2.5 configuration', () => {
   const server = read('server.js');
   const html = read('public/index.html');
   const client = read('public/app.js');
-  assert.match(server, /reasoning_level: 'TEXT'/);
-  assert.match(server, /app\.get\('\/api\/user\/preferences', requireAuth, requireSubscription/);
+  assert.match(server, /thinking_mode TEXT NOT NULL DEFAULT 'auto'/);
+  assert.match(server, /thinking_budget INTEGER NOT NULL DEFAULT 8192/);
+  assert.match(server, /output_target INTEGER NOT NULL DEFAULT 5000/);
+  assert.match(server, /thinking_budget: thinkingMode === 'budget' \? thinkingBudget : -1/);
+  assert.match(server, /parsed\.extra_body\.google/);
+  assert.match(server, /allowedBudgets = \[4096, 8192, 16384, 24576, 32768\]/);
+  assert.match(server, /allowedOutputTargets = \[2000, 5000, 10000, 20000\]/);
   assert.match(server, /app\.patch\('\/api\/user\/preferences', requireAuth, requireSubscription/);
-  assert.match(server, /\['low', 'medium', 'high', 'xhigh'\]\.includes\(reasoningLevel\)/);
-  assert.match(html, /id="userReasoningLevel"/);
-  for (const level of ['low', 'medium', 'high', 'xhigh']) assert.match(html, new RegExp(`<option value="${level}"`));
+  assert.match(html, /id="thinkingBudgetEnabled"/);
+  assert.match(html, /id="thinkingBudget"/);
+  assert.match(html, /id="longAnswerTarget"/);
   assert.match(client, /request\('\/api\/user\/preferences'/);
-  assert.match(client, /reasoningLevel: selectedReasoningLevel/);
+  assert.match(client, /JSON\.stringify\(desired\)/);
+  assert.match(html, /Long Answer Target/);
+  assert.match(server, /guidance\/allowance, never a guaranteed minimum response/i);
 });
 
-test('XHigh is transparently capped to Gemini 2.5 Pro compatible High rather than sent as unsupported effort', () => {
+test('OpenCode skills can be added privately per subscriber and are filesystem-safe', () => {
   const server = read('server.js');
-  assert.match(server, /effort === 'xhigh' \? 'high'/);
-  assert.match(server, /XHigh maps to the configured provider/);
+  const html = read('public/index.html');
+  const client = read('public/app.js');
+  assert.match(server, /app\.get\('\/api\/user\/skills', requireAuth, requireSubscription/);
+  assert.match(server, /app\.post\('\/api\/user\/skills', requireAuth, requireSubscription/);
+  assert.match(server, /app\.delete\('\/api\/user\/skills\/:id', requireAuth, requireSubscription/);
+  assert.match(server, /\.config', 'opencode', 'skills'/);
+  assert.match(server, /SKILL\.md/);
+  assert.match(server, /stat\.isSymbolicLink\(\)/);
+  assert.match(server, /Only your own custom skills can be removed/);
+  assert.match(server, /up to 20 custom skills/);
+  assert.match(html, /id="manageSkills"/);
+  assert.match(html, /id="skillsDialog"/);
+  assert.match(html, /id="skillInstructions"/);
+  assert.match(client, /request\('\/api\/user\/skills'/);
+  assert.match(client, /Remove skill/);
 });
 
 test('OpenCode cold start is prewarmed on workspace entry and concurrent starts are shared', () => {

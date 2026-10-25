@@ -54,3 +54,10 @@ Each subscribed user can choose Low, Medium, High, or XHigh from the chat compos
 
 - Account creation does not automatically sign users in. After successful registration, the UI switches to Sign In, keeps the email, clears the password field, and displays a non-error success notice.
 - Sign-in is handled asynchronously without a full page reload. Users with an active membership go directly to the chat workspace; accounts awaiting manual membership approval remain on the membership screen.
+
+
+## User generation preferences and personal skills
+
+Each active subscriber can choose automatic thinking (Gemini 2.5 dynamic budget) or an explicit Thinking Budget, and a Long Answer Target (2k, 5k, 10k, or 20k tokens). Output targets guide the model and set a generation allowance; they are not a guaranteed minimum response length. Explicit Gemini thinking budgets are sent through the Google OpenAI-compatibility `extra_body.google.thinking_config.thinking_budget` field and require the configured API gateway to forward that field.
+
+Subscribers can also add up to 20 private OpenCode Skills using a name, description, and instructions. Skills are written to each user's isolated `~/.config/opencode/skills/<skill-id>/SKILL.md`, following OpenCode's skill discovery format, and are not shared with other users.
