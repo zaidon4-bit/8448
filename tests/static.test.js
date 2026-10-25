@@ -63,18 +63,31 @@ test('the OpenCode prompt covers implementation, testing, and secret handling', 
   assert.match(prompt, /model providers/i);
 });
 
-test('subscription activation is webhook-based and signature checked', () => {
+test('subscription approval is manual in the admin panel and gated server-side', () => {
   const server = read('server.js');
-  assert.match(server, /constructEvent\(req\.body, req\.get\('stripe-signature'\), secret\)/);
-  assert.match(server, /customer\.subscription\.updated/);
-  assert.match(server, /requireSubscription/);
+  const admin = read('public/admin.html');
+  const adminJs = read('public/admin.js');
+  const app = read('public/app.js');
+  assert.match(server, /app\.post\('\/api\/admin\/users\/:id\/subscription', requireAuth, requireAdmin/);
+  assert.match(server, /subscription_status = 'active', subscription_source = 'manual'/);
+  assert.match(server, /subscription_requested_at = NULL/);
+  assert.match(server, /rawDays < 1 \|\| rawDays > 3650/);
+  assert.match(server, /end > Math\.floor\(Date\.now\(\) \/ 1000\)/);
+  assert.match(server, /app\.post\('\/api\/billing\/request-activation', requireAuth/);
+  assert.doesNotMatch(read('package.json'), /\"stripe\"/);
+  assert.match(server, /function requireSubscription/);
+  assert.match(admin, /id="activateSubscription"/);
+  assert.match(admin, /id="deactivateSubscription"/);
+  assert.match(adminJs, /updateSubscription\('activate'\)/);
+  assert.match(app, /\/api\/billing\/request-activation/);
+  assert.match(app, /ستؤكد الإدارة الاشتراك يدوياً/);
 });
 
 test('Render configuration preserves data and exposes health check', () => {
   const render = read('render.yaml');
   assert.match(render, /mountPath: \/var\/data/);
   assert.match(render, /healthCheckPath: \/healthz/);
-  assert.match(render, /STRIPE_WEBHOOK_SECRET/);
+  assert.match(render, /ADMIN_PASSWORD/);
 });
 
 test('each subscriber is configured with a private workspace and separate worker UID', () => {

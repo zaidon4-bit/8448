@@ -35,8 +35,15 @@
           <label class="field"><span>إعداد خوادم MCP للمستخدم (JSON اختياري)</span><textarea id="mcpConfig" rows="10" dir="ltr" spellcheck="false" placeholder='{"context7":{"type":"remote","url":"https://your-mcp-server.example/mcp","enabled":true}}'></textarea></label>
           <p class="admin-hint">خوادم MCP تضيف أدوات خارجية إلى OpenCode. اترك الحقل فارغاً للاحتفاظ بالإعداد المحفوظ؛ الصق JSON جديداً لاستبداله. أي أسرار داخل JSON تُشفّر على الخادم ولا تُعرض بعد الحفظ. لا تضف خادماً إلا إذا كنت تثق بمصدره وصلاحياته.</p>
           <label class="admin-check"><input id="isDisabled" type="checkbox"><span>إيقاف حساب المستخدم ومنعه من استخدام الخدمة</span></label>
-          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">حفظ الإعدادات</button><button id="clearApi" class="button button-quiet" type="button">مسح اتصال API</button><button id="clearMcp" class="button button-quiet" type="button">مسح إعداد MCP</button></div>
-          <p class="admin-hint">تفعيل الاشتراك المدفوع يتم عبر تأكيد الدفع من Stripe؛ لا تفعّله من هذه الصفحة يدوياً.</p>
+          <section class="subscription-admin-box" aria-labelledby="subscriptionAdminHeading">
+            <div class="subscription-admin-heading"><div><h3 id="subscriptionAdminHeading">تأكيد الاشتراك يدوياً</h3><p>راجع الدفع خارج الموقع، ثم فعّل العضوية من هنا.</p></div><span id="subscriptionStatusPill" class="pill">غير مشترك</span></div>
+            <p id="subscriptionRequestInfo" class="admin-hint">لا يوجد طلب تفعيل معلّق.</p>
+            <label class="field"><span>مدة الاشتراك بالأيام</span><input id="subscriptionDays" type="number" min="1" max="3650" step="1" value="30" inputmode="numeric"></label>
+            <p id="subscriptionEndInfo" class="admin-hint">عند التفعيل، تُحسب مدة الاشتراك من وقت الموافقة.</p>
+            <div class="admin-actions"><button id="activateSubscription" class="button button-primary" type="button">تأكيد الدفع وتفعيل 30 يوماً</button><button id="deactivateSubscription" class="button button-quiet" type="button">إلغاء التفعيل</button></div>
+          </section>
+          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">حفظ إعدادات API وMCP</button><button id="clearApi" class="button button-quiet" type="button">مسح اتصال API</button><button id="clearMcp" class="button button-quiet" type="button">مسح إعداد MCP</button></div>
+          <p class="admin-hint">تفعيل العضوية يدوي فقط: لن يتم فتح مساحة العمل حتى تضغط زر التفعيل، وتُحفظ الموافقة على الخادم.</p>
         </form>
       </section>
     </section>

@@ -34,7 +34,7 @@ function renderUsers() {
     const email = document.createElement('div'); email.className = 'user-email'; email.textContent = user.email;
     const meta = document.createElement('div'); meta.className = 'user-meta';
     meta.append(pill(`#${user.id}`), pill(user.apiConfigured ? 'API مهيّأ' : 'API غير مهيّأ', user.apiConfigured ? 'good' : ''));
-    meta.append(pill(user.subscriptionStatus === 'active' || user.subscriptionStatus === 'trialing' ? 'اشتراك فعّال' : 'غير مشترك', user.subscriptionStatus === 'active' || user.subscriptionStatus === 'trialing' ? 'good' : ''));
+    meta.append(pill(user.subscriptionRequestedAt ? 'طلب تفعيل معلّق' : (user.subscriptionActive ? 'اشتراك فعّال' : (user.subscriptionStatus === 'active' ? 'منتهي' : 'غير مشترك')), user.subscriptionRequestedAt ? 'pending' : (user.subscriptionActive ? 'good' : '')));
     if (user.isDisabled) meta.append(pill('موقوف', 'bad'));
     info.append(email, meta); button.append(info); button.addEventListener('click', () => selectUser(user.id)); list.append(button);
   }
@@ -51,6 +51,12 @@ function selectUser(id) {
   $('mcpConfig').value = '';
   $('apiKey').placeholder = user.apiConfigured ? 'مفتاح محفوظ؛ أدخل مفتاحاً جديداً للاستبدال' : 'أدخل مفتاح API للمستخدم';
   $('isDisabled').checked = user.isDisabled;
+  $('subscriptionStatusPill').textContent = user.subscriptionRequestedAt ? 'طلب قيد المراجعة' : (user.subscriptionActive ? 'اشتراك فعّال' : (user.subscriptionStatus === 'active' ? 'انتهت المدة' : 'غير مشترك'));
+  $('subscriptionStatusPill').className = `pill ${user.subscriptionActive ? 'good' : (user.subscriptionRequestedAt ? 'pending' : '')}`;
+  $('subscriptionRequestInfo').textContent = user.subscriptionRequestedAt ? `طلب تفعيل بتاريخ: ${user.subscriptionRequestedAt}` : 'لا يوجد طلب تفعيل معلّق.';
+  $('subscriptionEndInfo').textContent = user.subscriptionCurrentPeriodEnd ? `تاريخ انتهاء الاشتراك: ${new Date(user.subscriptionCurrentPeriodEnd * 1000).toLocaleString()}` : 'لا يوجد تاريخ انتهاء مسجّل.';
+  $('subscriptionDays').value = '30';
+  $('activateSubscription').textContent = `تأكيد الدفع وتفعيل ${$('subscriptionDays').value} يوماً`;
   $('apiStatus').textContent = `${user.apiConfigured ? 'اتصال مخصص محفوظ' : 'لا يوجد اتصال مخصص'} · ${user.mcpConfigured ? 'MCP محفوظ' : 'لا يوجد MCP'}`;
   $('apiStatus').style.color = user.apiConfigured ? '#a7efd4' : '#a9b4cb';
   renderUsers();
@@ -91,6 +97,34 @@ $('userConfigForm').addEventListener('submit', async event => {
   } catch (err) { notice(err.message, true); }
   finally { button.disabled = false; }
 });
+$('subscriptionDays').addEventListener('input', () => {
+  $('activateSubscription').textContent = `تأكيد الدفع وتفعيل ${$('subscriptionDays').value || '…'} يوماً`;
+});
+async function updateSubscription(action) {
+  if (!selectedId) return notice('اختر مستخدماً أولاً.', true);
+  const days = Number($('subscriptionDays').value || 30);
+  if (action === 'activate' && (!Number.isInteger(days) || days < 1 || days > 3650)) {
+    return notice('مدة الاشتراك يجب أن تكون بين يوم و3650 يوماً.', true);
+  }
+  const user = users.find(item => item.id === selectedId);
+  const prompt = action === 'activate'
+    ? `هل تحققت من الدفع وتريد تفعيل اشتراك ${user ? user.email : 'هذا المستخدم'} لمدة ${days} يوماً؟`
+    : `هل تريد إلغاء اشتراك ${user ? user.email : 'هذا المستخدم'} فوراً؟`;
+  if (!window.confirm(prompt)) return;
+  const button = action === 'activate' ? $('activateSubscription') : $('deactivateSubscription');
+  button.disabled = true;
+  try {
+    await api(`/api/admin/users/${selectedId}/subscription`, {
+      method: 'POST', body: JSON.stringify(action === 'activate' ? { action, days } : { action })
+    });
+    notice(action === 'activate' ? `تم تفعيل الاشتراك يدوياً لمدة ${days} يوماً.` : 'تم إلغاء الاشتراك يدوياً.');
+    await loadUsers(true);
+  } catch (err) { notice(err.message, true); }
+  finally { button.disabled = false; }
+}
+$('activateSubscription').addEventListener('click', () => updateSubscription('activate'));
+$('deactivateSubscription').addEventListener('click', () => updateSubscription('deactivate'));
+
 $('clearApi').addEventListener('click', async () => {
   if (!selectedId) return notice('اختر مستخدماً أولاً.', true);
   if (!window.confirm('هل تريد مسح اتصال API المخصص لهذا المستخدم؟')) return;

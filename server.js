@@ -5,7 +5,6 @@ const helmet = require('helmet');
 const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
 const jwt = require('jsonwebtoken');
-const Stripe = require('stripe');
 const multer = require('multer');
 const { rateLimit } = require('express-rate-limit');
 const fs = require('node:fs');
@@ -56,9 +55,9 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    stripe_customer_id TEXT,
-    stripe_subscription_id TEXT,
     subscription_status TEXT NOT NULL DEFAULT 'inactive',
+    subscription_source TEXT NOT NULL DEFAULT 'manual',
+    subscription_requested_at TEXT,
     subscription_current_period_end INTEGER,
     opencode_session_id TEXT,
     is_admin INTEGER NOT NULL DEFAULT 0,
@@ -77,10 +76,6 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_chat_messages_user_id_id ON chat_messages(user_id, id);
-  CREATE TABLE IF NOT EXISTS stripe_events (
-    event_id TEXT PRIMARY KEY,
-    processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
 `);
 // Additive migrations keep databases created by earlier versions compatible.
 const userColumns = new Set(db.pragma('table_info(users)').map(column => column.name));
@@ -90,24 +85,21 @@ for (const [name, definition] of Object.entries({
   ai_base_url: 'TEXT',
   ai_model_id: 'TEXT',
   ai_api_key_encrypted: 'TEXT',
-  ai_mcp_config_encrypted: 'TEXT'
+  ai_mcp_config_encrypted: 'TEXT',
+  subscription_source: "TEXT NOT NULL DEFAULT 'manual'",
+  subscription_requested_at: 'TEXT'
 })) {
   if (!userColumns.has(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
 }
 
 const selectUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const selectUserByEmail = db.prepare('SELECT * FROM users WHERE email = ?');
-const selectUserByCustomer = db.prepare('SELECT * FROM users WHERE stripe_customer_id = ?');
 const insertMessage = db.prepare('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)');
 const selectMessages = db.prepare('SELECT role, content, created_at FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?');
-const updateSubscription = db.prepare(`UPDATE users SET stripe_customer_id = COALESCE(?, stripe_customer_id),
-  stripe_subscription_id = ?, subscription_status = ?, subscription_current_period_end = ? WHERE id = ?`);
-
-function stripeClient() {
-  return process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
-}
 function isActiveSubscription(user) {
-  return !!user && ['active', 'trialing'].includes(user.subscription_status);
+  if (!user || !['active', 'trialing'].includes(user.subscription_status)) return false;
+  const end = Number(user.subscription_current_period_end || 0);
+  return !end || end > Math.floor(Date.now() / 1000);
 }
 function serializeUser(user) {
   return {
@@ -116,6 +108,8 @@ function serializeUser(user) {
     subscriptionStatus: user.subscription_status,
     subscriptionActive: isActiveSubscription(user),
     subscriptionCurrentPeriodEnd: user.subscription_current_period_end,
+    subscriptionRequestedAt: user.subscription_requested_at || null,
+    subscriptionSource: user.subscription_source || 'manual',
     isAdmin: user.is_admin === 1,
     accountDisabled: user.is_disabled === 1
   };
@@ -602,46 +596,6 @@ function originGuard(req, res, next) {
   }
   next();
 }
-app.post('/api/stripe/webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
-  const stripe = stripeClient();
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!stripe || !secret) return res.status(503).send('Webhook unavailable');
-  let event;
-  try { event = stripe.webhooks.constructEvent(req.body, req.get('stripe-signature'), secret); }
-  catch (err) { console.warn('Stripe webhook signature verification failed.'); return res.status(400).send('Invalid signature'); }
-  if (db.prepare('SELECT event_id FROM stripe_events WHERE event_id = ?').get(event.id)) return res.json({ received: true, duplicate: true });
-  try {
-    if (event.type === 'checkout.session.completed') {
-      const session = event.data.object;
-      const userId = Number(session.metadata && session.metadata.userId);
-      if (session.mode === 'subscription' && userId && session.subscription) {
-        const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription.id;
-        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-        applyStripeSubscription(subscription, userId, session.customer);
-      }
-    } else if (['customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted'].includes(event.type)) {
-      const subscription = event.data.object;
-      let userId = Number(subscription.metadata && subscription.metadata.userId) || 0;
-      if (!userId && subscription.customer) {
-        const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
-        const found = selectUserByCustomer.get(customerId);
-        if (found) userId = found.id;
-      }
-      if (userId) applyStripeSubscription(subscription, userId, subscription.customer);
-    } else if (event.type === 'invoice.payment_failed') {
-      const invoice = event.data.object;
-      const customerId = typeof invoice.customer === 'string' ? invoice.customer : invoice.customer && invoice.customer.id;
-      const found = customerId ? selectUserByCustomer.get(customerId) : null;
-      if (found) db.prepare("UPDATE users SET subscription_status = 'past_due' WHERE id = ?").run(found.id);
-    }
-    db.prepare('INSERT OR IGNORE INTO stripe_events(event_id) VALUES (?)').run(event.id);
-    return res.json({ received: true });
-  } catch (err) {
-    console.error('Stripe webhook processing failed:', err && err.message ? err.message : 'unknown error');
-    return res.status(500).send('Webhook processing failed');
-  }
-});
-
 app.use(express.json({ limit: '2mb' }));
 app.use(originGuard);
 
@@ -704,23 +658,28 @@ bootstrapAdminAccount();
 app.get('/healthz', (req, res) => res.status(200).json({ ok: true, service: 'codecraft' }));
 app.get('/api/config', (req, res) => res.json({
   productName: process.env.PRODUCT_NAME || 'CodeCraft Studio',
-  subscriptionPriceLabel: process.env.SUBSCRIPTION_DISPLAY_PRICE || 'اشتراك مدفوع شهري',
+  subscriptionPriceLabel: process.env.SUBSCRIPTION_DISPLAY_PRICE || 'تفعيل يدوي بعد مراجعة الإدارة',
+  subscriptionApprovalMode: 'manual',
+  manualApprovalEnabled: true,
   assistantConfigured: aiConfigReady(),
-  paymentsConfigured: !!(process.env.STRIPE_SECRET_KEY && process.env.STRIPE_PRICE_ID_MONTHLY && process.env.STRIPE_WEBHOOK_SECRET)
+  paymentsConfigured: false
 }));
 app.get('/api/me', (req, res) => {
   attachAuth(req, res, () => res.json({ user: req.authUser ? serializeUser(req.authUser) : null }));
 });
 app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
 app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
-  const users = db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status,
-    subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, ai_mcp_config_encrypted, created_at
+  const users = db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status, subscription_source,
+    subscription_requested_at, subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, ai_mcp_config_encrypted, created_at
     FROM users ORDER BY id DESC LIMIT 500`).all().map(user => ({
       id: user.id,
       email: user.email,
       isAdmin: user.is_admin === 1,
       isDisabled: user.is_disabled === 1,
       subscriptionStatus: user.subscription_status,
+      subscriptionActive: isActiveSubscription(user),
+      subscriptionSource: user.subscription_source || 'manual',
+      subscriptionRequestedAt: user.subscription_requested_at || null,
       subscriptionCurrentPeriodEnd: user.subscription_current_period_end,
       apiConfigured: !!(user.ai_base_url && user.ai_model_id && user.ai_api_key_encrypted),
       mcpConfigured: !!user.ai_mcp_config_encrypted,
@@ -731,6 +690,40 @@ app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ users });
 });
+app.post('/api/admin/users/:id/subscription', requireAuth, requireAdmin, (req, res) => {
+  const userId = Number(req.params.id);
+  if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'رقم المستخدم غير صالح.' });
+  const user = selectUserById.get(userId);
+  if (!user) return res.status(404).json({ error: 'المستخدم غير موجود.' });
+  const action = String((req.body && req.body.action) || '');
+  if (!['activate', 'deactivate'].includes(action)) return res.status(400).json({ error: 'إجراء الاشتراك غير صالح.' });
+
+  if (action === 'activate') {
+    const rawDays = req.body && req.body.days !== undefined ? Number(req.body.days) : 30;
+    if (!Number.isInteger(rawDays) || rawDays < 1 || rawDays > 3650) {
+      return res.status(400).json({ error: 'مدة الاشتراك يجب أن تكون بين يوم و3650 يوماً.' });
+    }
+    const endAt = Math.floor(Date.now() / 1000) + rawDays * 86400;
+    db.prepare(`UPDATE users SET subscription_status = 'active', subscription_source = 'manual',
+      subscription_current_period_end = ?, subscription_requested_at = NULL WHERE id = ?`).run(endAt, userId);
+    stopInstance(userId);
+    const updated = selectUserById.get(userId);
+    return res.json({ ok: true, user: { id: updated.id, email: updated.email,
+      subscriptionStatus: updated.subscription_status, subscriptionActive: isActiveSubscription(updated),
+      subscriptionSource: updated.subscription_source, subscriptionCurrentPeriodEnd: updated.subscription_current_period_end,
+      subscriptionRequestedAt: updated.subscription_requested_at } });
+  }
+
+  db.prepare(`UPDATE users SET subscription_status = 'inactive', subscription_source = 'manual',
+    subscription_current_period_end = NULL, subscription_requested_at = NULL WHERE id = ?`).run(userId);
+  stopInstance(userId);
+  const updated = selectUserById.get(userId);
+  res.json({ ok: true, user: { id: updated.id, email: updated.email,
+    subscriptionStatus: updated.subscription_status, subscriptionActive: isActiveSubscription(updated),
+    subscriptionSource: updated.subscription_source, subscriptionCurrentPeriodEnd: updated.subscription_current_period_end,
+    subscriptionRequestedAt: updated.subscription_requested_at } });
+});
+
 app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
   const userId = Number(req.params.id);
   if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'رقم المستخدم غير صالح.' });
@@ -837,41 +830,21 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/billing/checkout', requireAuth, async (req, res) => {
-  const stripe = stripeClient();
-  const priceId = process.env.STRIPE_PRICE_ID_MONTHLY;
-  if (!stripe || !priceId || !process.env.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: 'الدفع غير مهيّأ بعد. أكمل إعداد الاشتراك من لوحة الإدارة.' });
-  if (isActiveSubscription(req.authUser)) return res.status(409).json({ error: 'اشتراكك فعّال بالفعل.' });
-  try {
-    const origin = getRequestOrigin(req);
-    const customer = req.authUser.stripe_customer_id ? { id: req.authUser.stripe_customer_id } : null;
-    const checkout = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      ...(customer ? { customer: customer.id } : { customer_email: req.authUser.email }),
-      line_items: [{ price: priceId, quantity: 1 }],
-      client_reference_id: String(req.authUser.id),
-      metadata: { userId: String(req.authUser.id) },
-      subscription_data: { metadata: { userId: String(req.authUser.id) } },
-      success_url: `${origin}/?payment=success`,
-      cancel_url: `${origin}/?payment=cancelled`,
-      allow_promotion_codes: true
-    });
-    res.json({ url: checkout.url });
-  } catch (err) {
-    console.error('Checkout session creation failed:', err.message);
-    res.status(502).json({ error: 'تعذّر بدء صفحة الدفع الآن. حاول مجدداً.' });
-  }
+app.post('/api/billing/request-activation', requireAuth, (req, res) => {
+  const user = selectUserById.get(req.authUser.id);
+  if (isActiveSubscription(user)) return res.status(409).json({ error: 'اشتراكك فعّال بالفعل.' });
+  db.prepare(`UPDATE users SET subscription_requested_at = COALESCE(subscription_requested_at, CURRENT_TIMESTAMP),
+    subscription_source = 'manual' WHERE id = ?`).run(user.id);
+  const updated = selectUserById.get(user.id);
+  res.status(202).json({ ok: true, subscriptionRequestedAt: updated.subscription_requested_at,
+    message: 'تم إرسال طلب مراجعة الاشتراك. ستقوم الإدارة بمراجعته وتفعيله يدوياً.' });
 });
-app.post('/api/billing/portal', requireAuth, async (req, res) => {
-  const stripe = stripeClient();
-  if (!stripe || !req.authUser.stripe_customer_id) return res.status(400).json({ error: 'لا يوجد حساب اشتراك لإدارته بعد.' });
-  try {
-    const portal = await stripe.billingPortal.sessions.create({ customer: req.authUser.stripe_customer_id, return_url: `${getRequestOrigin(req)}/` });
-    res.json({ url: portal.url });
-  } catch (err) {
-    console.error('Billing portal creation failed:', err.message);
-    res.status(502).json({ error: 'تعذّر فتح إدارة الاشتراك الآن.' });
-  }
+
+app.post('/api/billing/checkout', requireAuth, (req, res) => {
+  res.status(410).json({ error: 'تأكيد الاشتراك يتم يدوياً من لوحة الإدارة. أرسل طلب مراجعة الاشتراك من صفحة العضوية.' });
+});
+app.post('/api/billing/portal', requireAuth, (req, res) => {
+  res.status(410).json({ error: 'إدارة الاشتراك تتم يدوياً عن طريق الإدارة.' });
 });
 
 app.get('/api/chat/history', requireAuth, requireSubscription, (req, res) => {
@@ -1022,17 +995,10 @@ app.use((err, req, res, next) => {
   return res.status(500).json({ error: 'حدث خطأ داخلي. حاول مجدداً.' });
 });
 
-function applyStripeSubscription(subscription, userId, customerRef) {
-  const user = selectUserById.get(Number(userId));
-  if (!user) return;
-  const customerId = typeof customerRef === 'string' ? customerRef : customerRef && customerRef.id;
-  updateSubscription.run(customerId || null, subscription.id || null, subscription.status || 'inactive', subscription.current_period_end || null, Number(userId));
-}
-
 const appServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(`CodeCraft web service listening on port ${PORT}`);
   if (!aiConfigReady()) console.warn('No default AI API configured. Assign a user-specific API from /admin before testing the coding workspace.');
-  if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET || !process.env.STRIPE_PRICE_ID_MONTHLY) console.warn('Subscription payment settings are incomplete.');
+  console.log('Subscription approvals are handled manually in /admin.');
 });
 proxyServer.listen(AI_PROXY_PORT, AI_PROXY_HOST, () => console.log('Internal AI gateway listening on loopback.'));
 

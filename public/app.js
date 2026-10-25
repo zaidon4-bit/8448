@@ -3,7 +3,7 @@
 const $ = id => document.getElementById(id);
 let authMode = 'register';
 let currentUser = null;
-let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'اشتراك مدفوع شهري', assistantConfigured: false, paymentsConfigured: false };
+let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'تفعيل يدوي بعد مراجعة الإدارة', assistantConfigured: false, paymentsConfigured: false, manualApprovalEnabled: true };
 let busy = false;
 
 $('year').textContent = new Date().getFullYear();
@@ -130,7 +130,17 @@ function renderUser() {
     setView('workspace');
     loadHistory();
   } else {
-    $('priceDisplay').textContent = config.subscriptionPriceLabel || 'اشتراك مدفوع شهري';
+    $('priceDisplay').textContent = config.subscriptionPriceLabel || 'تفعيل يدوي بعد مراجعة الإدارة';
+    const requested = !!currentUser.subscriptionRequestedAt;
+    const requestButton = $('requestActivationButton');
+    if (requestButton) {
+      requestButton.disabled = requested;
+      requestButton.innerHTML = requested ? 'تم إرسال طلب المراجعة ✓' : 'طلب مراجعة وتفعيل الاشتراك <span>←</span>';
+    }
+    const statusText = $('membershipStatusText');
+    if (statusText) statusText.textContent = requested
+      ? 'طلبك قيد المراجعة. ستقوم الإدارة بتفعيل الاشتراك بعد التأكد.'
+      : 'إذا أكملت الدفع بالطريقة المتفق عليها، أرسل طلب مراجعة؛ ستؤكد الإدارة الاشتراك يدوياً.';
     setView('membership');
   }
 }
@@ -160,21 +170,12 @@ function setAuthMode(mode) {
 }
 async function loadInitial() {
   try { config = await request('/api/config'); } catch {}
-  $('priceDisplay').textContent = config.subscriptionPriceLabel || 'اشتراك مدفوع شهري';
+  $('priceDisplay').textContent = config.subscriptionPriceLabel || 'تفعيل يدوي بعد مراجعة الإدارة';
   try {
     const data = await request('/api/me');
     currentUser = data.user;
     renderUser();
   } catch { currentUser = null; renderUser(); }
-  const query = new URLSearchParams(window.location.search);
-  if (query.get('payment') === 'success') {
-    showGlobal('عاد المتصفح من صفحة الدفع. نتحقق من تأكيد الاشتراك؛ قد يستغرق التفعيل بضع لحظات.');
-    window.history.replaceState({}, '', '/');
-    await refreshMembership(true);
-  } else if (query.get('payment') === 'cancelled') {
-    showGlobal('تم إلغاء صفحة الدفع ولم يتم تأكيد اشتراك جديد.', true);
-    window.history.replaceState({}, '', '/');
-  }
 }
 async function refreshMembership(retry = false) {
   const button = $('refreshMembership');
@@ -189,7 +190,7 @@ async function refreshMembership(retry = false) {
     }
     renderUser();
     const note = $('billingNote');
-    showNotice(note, 'لم يصل تأكيد الدفع بعد. إذا دفعت بالفعل، انتظر قليلاً ثم أعد التحقق.', 'error');
+    showNotice(note, currentUser && currentUser.subscriptionRequestedAt ? 'طلبك ما زال قيد مراجعة الإدارة. حدّث الحالة لاحقاً.' : 'لم يُفعّل الاشتراك بعد. أرسل طلب مراجعة إذا أتممت الدفع بالطريقة المتفق عليها.', 'error');
   } catch (err) { showGlobal(err.message, true); }
   finally { if (button) { button.disabled = false; button.textContent = 'تحقق من حالة الاشتراك'; } }
 }
@@ -212,17 +213,18 @@ $('topLogout').addEventListener('click', async () => {
   try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } catch {}
   currentUser = null; renderUser(); showGlobal('تم تسجيل الخروج.');
 });
-$('checkoutButton').addEventListener('click', async () => {
-  const button = $('checkoutButton'); button.disabled = true;
-  try { const data = await request('/api/billing/checkout', { method: 'POST', body: '{}' }); window.location.assign(data.url); }
-  catch (err) { showNotice('billingNote', err.message, 'error'); }
-  finally { button.disabled = false; }
+$('requestActivationButton').addEventListener('click', async () => {
+  const button = $('requestActivationButton'); button.disabled = true;
+  try {
+    const data = await request('/api/billing/request-activation', { method: 'POST', body: '{}' });
+    const refreshed = await request('/api/me'); currentUser = refreshed.user; renderUser();
+    showNotice($('billingNote'), data.message || 'تم إرسال طلب مراجعة الاشتراك.', 'success');
+  } catch (err) {
+    showNotice($('billingNote'), err.message, 'error');
+    button.disabled = false;
+  }
 });
 $('refreshMembership').addEventListener('click', () => refreshMembership(false));
-$('manageBilling').addEventListener('click', async () => {
-  try { const data = await request('/api/billing/portal', { method: 'POST', body: '{}' }); window.location.assign(data.url); }
-  catch (err) { showGlobal(err.message, true); }
-});
 $('newChatButton').addEventListener('click', async () => {
   try { await request('/api/chat/new', { method: 'POST', body: '{}' }); $('chatMessages').innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>مهمة جديدة</h3><p>اكتب الهدف المطلوب تنفيذه.</p></div>'; }
   catch (err) { showGlobal(err.message, true); }

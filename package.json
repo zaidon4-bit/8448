@@ -2,7 +2,7 @@
   "name": "codecraft-opencode-membership",
   "version": "1.0.0",
   "private": true,
-  "description": "Subscription-gated coding assistant powered by an OpenCode server",
+  "description": "Manual-approval coding workspace powered by the OpenCode headless server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -19,7 +19,6 @@
     "express-rate-limit": "^7.5.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
-    "stripe": "^18.5.0",
     "multer": "^2.0.2"
   }
 }

@@ -71,14 +71,14 @@
         <div>
           <div class="eyebrow"><span class="eyebrow-dot"></span> العضوية</div>
           <h2>افتح مساحة العمل الكاملة.</h2>
-          <p class="muted">يشمل الاشتراك وكيل البرمجة وأدوات قراءة الملفات وتعديلها وتشغيل الاختبارات ومراجعة النتائج.</p>
+          <p class="muted">يشمل الاشتراك وكيل البرمجة وأدوات قراءة الملفات وتعديلها وتشغيل الاختبارات ومراجعة النتائج. يتم تأكيد العضوية يدوياً من الإدارة.</p>
           <div class="membership-features"><span>✓ مساحة عمل خاصة</span><span>✓ سجل المحادثات</span><span>✓ إدارة الاشتراك</span></div>
         </div>
         <div class="price-card">
           <span class="price-label">الاشتراك</span>
-          <strong id="priceDisplay">اشتراك مدفوع شهري</strong>
-          <span class="muted small">تُدار عملية الدفع بشكل آمن.</span>
-          <button id="checkoutButton" class="button button-primary button-full" type="button">تفعيل الاشتراك <span>←</span></button>
+          <strong id="priceDisplay">تفعيل يدوي بعد مراجعة الإدارة</strong>
+          <span id="membershipStatusText" class="muted small">إذا أكملت الدفع بالطريقة المتفق عليها، أرسل طلب مراجعة؛ ستؤكد الإدارة الاشتراك يدوياً.</span>
+          <button id="requestActivationButton" class="button button-primary button-full" type="button">طلب مراجعة وتفعيل الاشتراك <span>←</span></button>
           <button id="refreshMembership" class="button button-quiet button-full" type="button">تحقق من حالة الاشتراك</button>
           <div id="billingNote" class="notice hidden" role="status"></div>
         </div>
@@ -94,7 +94,7 @@
         <div class="sidebar-item"><span>▤</span><span>سجل المحادثات</span><small>قريباً</small></div>
         <div class="sidebar-spacer"></div>
         <div class="tool-card"><div class="tool-card-icon">✧</div><strong>وكيل برمجي متكامل</strong><p>يحلل، ينفّذ، يختبر، ويراجع التغييرات.</p></div>
-        <button id="manageBilling" class="button button-quiet button-full" type="button">إدارة الاشتراك</button>
+        <p class="billing-managed-note">تُدار العضوية يدوياً من الإدارة.</p>
       </aside>
       <section class="chat-area">
         <div class="chat-topline" aria-hidden="true"></div>
