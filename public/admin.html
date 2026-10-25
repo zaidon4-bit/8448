@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080b14">
+  <title>لوحة الإدارة — CodeCraft</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body class="admin-page">
+  <header class="topbar admin-topbar">
+    <a class="brand" href="/" aria-label="العودة إلى CodeCraft"><span class="brand-mark"><span></span><span></span><span></span><span></span></span><span><strong>CodeCraft</strong><small>ADMIN</small></span></a>
+    <div class="header-actions"><a class="button button-quiet" href="/">العودة للتطبيق</a></div>
+  </header>
+  <main class="admin-shell">
+    <section class="admin-heading"><div class="eyebrow"><span class="eyebrow-dot"></span> إدارة الحسابات</div><h1>لوحة الإدارة</h1><p>إعداد اتصال برمجي منفصل لكل مستخدم والتحكم بحالة حسابه.</p></section>
+    <div id="adminNotice" class="notice hidden" role="status"></div>
+    <section id="accessDenied" class="admin-card hidden"><h2>تسجيل دخول الإدارة مطلوب</h2><p>سجّل الدخول بحساب الإدارة من الصفحة الرئيسية، ثم افتح هذه الصفحة مجدداً.</p><a class="button button-primary" href="/">الذهاب لتسجيل الدخول</a></section>
+    <section id="adminContent" class="admin-layout hidden">
+      <aside class="admin-card user-list-card">
+        <div class="card-heading"><div><h2>المستخدمون</h2><p>اختر حساباً لتعديل إعداداته.</p></div><button id="refreshUsers" class="button button-quiet" type="button" title="تحديث القائمة">↻</button></div>
+        <label class="field admin-search"><span>بحث بالبريد</span><input id="userSearch" type="search" placeholder="ابحث عن مستخدم…" autocomplete="off"></label>
+        <div id="usersList" class="users-list"><div class="admin-empty">جارٍ تحميل الحسابات…</div></div>
+      </aside>
+      <section class="admin-card user-editor">
+        <div class="card-heading"><div><h2 id="editorTitle">إعداد المستخدم</h2><p id="editorSubtitle">اختر حساباً من القائمة.</p></div><span id="apiStatus" class="admin-status">غير محدد</span></div>
+        <form id="userConfigForm" class="admin-form">
+          <input id="selectedUserId" type="hidden">
+          <label class="field"><span>عنوان API الأساسي</span><input id="apiBaseUrl" type="url" placeholder="https://api.example.com/v1" dir="ltr" autocomplete="url"></label>
+          <label class="field"><span>معرّف النموذج</span><input id="modelId" type="text" placeholder="model-id" dir="ltr" maxlength="200" autocomplete="off"></label>
+          <label class="field"><span>مفتاح API</span><input id="apiKey" type="password" placeholder="أدخل مفتاحاً جديداً لتغييره" dir="ltr" autocomplete="new-password" maxlength="2000"></label>
+          <p class="admin-hint">المفتاح المحفوظ لا يمكن عرضه مجدداً. اترك الحقل فارغاً للاحتفاظ بالمفتاح الحالي.</p>
+          <label class="admin-check"><input id="isDisabled" type="checkbox"><span>إيقاف حساب المستخدم ومنعه من استخدام الخدمة</span></label>
+          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">حفظ الإعدادات</button><button id="clearApi" class="button button-quiet" type="button">مسح اتصال API</button></div>
+          <p class="admin-hint">تفعيل الاشتراك المدفوع يتم عبر تأكيد الدفع من Stripe؛ لا تفعّله من هذه الصفحة يدوياً.</p>
+        </form>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

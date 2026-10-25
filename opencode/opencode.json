@@ -1,0 +1,33 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "managed": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Code Assistant",
+      "options": {
+        "baseURL": "http://127.0.0.1:4097/v1",
+        "apiKey": "{env:AI_PROXY_TOKEN}"
+      },
+      "models": {
+        "code-assistant": {
+          "name": "Code Assistant"
+        }
+      }
+    }
+  },
+  "model": "managed/code-assistant",
+  "default_agent": "build",
+  "permission": {
+    "*": "allow"
+  },
+  "lsp": true,
+  "agent": {
+    "build": {
+      "mode": "primary",
+      "prompt": "{file:/app/opencode/system-prompt.txt}"
+    }
+  },
+  "websearch": {
+    "provider": "exa"
+  }
+}

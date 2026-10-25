@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thinking animation</title>
+<style>
+  :root {
+    --S: 56px;          /* cube size: scales everything */
+    --cube-a: #FFFBC6;  /* light yellow (top-left tint) */
+    --cube-b: #FFF59D;  /* light yellow (main) */
+    --eye: #1a1a1a;
+    --text: #a1aec7;
+  }
+  html, body { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+  body { display: grid; place-items: center; position: relative; font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .particles { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+  .particles i { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: #fff0aa; opacity: .36; box-shadow: 0 0 10px #ffe8a3; animation: drift 2.7s ease-in-out infinite; }
+  .particles i:nth-child(1) { left: 17%; top: 28%; animation-delay: -.3s; }
+  .particles i:nth-child(2) { left: 31%; top: 70%; animation-delay: -1.4s; background: #9dbdff; }
+  .particles i:nth-child(3) { left: 72%; top: 22%; animation-delay: -.8s; }
+  .particles i:nth-child(4) { left: 86%; top: 67%; animation-delay: -2s; background: #a7ecdf; }
+  .particles i:nth-child(5) { left: 63%; top: 81%; animation-delay: -1.1s; }
+  .particles i:nth-child(6) { left: 9%; top: 56%; animation-delay: -2.3s; background: #9dbdff; }
+  @keyframes drift { 0%,100% { transform: translate3d(0, 4px, 0) scale(.65); opacity: .18; } 50% { transform: translate3d(3px, -7px, 0) scale(1.15); opacity: .72; } }
+  @media (prefers-reduced-motion: reduce) { .particles i { animation: none; } }
+
+  .loader { display: flex; align-items: center; gap: calc(var(--S) * .3); }
+  .cell   { position: relative; width: calc(var(--S) * 1.35); height: calc(var(--S) * 1.5); flex: none; }
+
+  .cube { position: absolute; left: calc(var(--S) * .06); top: calc(var(--S) * .12);
+          width: var(--S); height: calc(var(--S) * .88); will-change: transform; }
+  .cube svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; display: block; }
+  .eyes { position: absolute; width: 32%; height: 25%; display: flex; justify-content: space-between;
+          transform: translate(-50%, -50%); will-change: left, top; }
+  .eyes i { width: 36%; height: 100%; background: var(--eye); border-radius: 28% / 16%; }
+
+  .label { color: var(--text); font-size: calc(var(--S) * .29); letter-spacing: .01em;
+           transition: opacity .2s; white-space: nowrap; }
+</style>
+</head>
+<body>
+  <div class="particles" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="loader" role="status" aria-live="polite">
+    <div class="cell">
+      <div class="cube" id="cube">
+        <!-- one solid shape (no seams, no gaps); rounded corners come from the round stroke -->
+        <svg viewBox="0 0 100 88" aria-hidden="true">
+          <defs>
+            <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="var(--cube-a)"/>
+              <stop offset="1" stop-color="var(--cube-b)"/>
+            </linearGradient>
+          </defs>
+          <polygon id="shape" fill="url(#g)" stroke="url(#g)" stroke-width="14" stroke-linejoin="round"/>
+        </svg>
+        <div class="eyes" id="eyes"><i></i><i></i></div>
+      </div>
+    </div>
+    <span class="label" id="label">يفكّر...</span>
+  </div>
+
+<script>
+  /* ---------- settings ---------- */
+  const LEG   = 0.83;                      // seconds per side (4 sides = ~3.3s loop, like the video)
+  const WORDS = ["يفكّر...", "ينفّذ...", "يفحص النتيجة..."];   // status words
+  const WORD_EVERY = 2.7;                  // seconds
+
+  // the four stops (x, y in cube sizes), where the eyes look, and how much the top-left corner is cut
+  const STOPS = [
+    { x: 0,    y: 0,    ex: .34, ey: .47, c: 0   },   // top-left
+    { x: .228, y: 0,    ex: .66, ey: .25, c: 1   },   // top-right
+    { x: .228, y: .338, ex: .57, ey: .60, c: .55 },   // bottom-right
+    { x: 0,    y: .338, ex: .30, ey: .55, c: .45 }    // bottom-left
+  ];
+
+  /* ---------- spring physics: smooth, with natural overshoot ---------- */
+  const spring = (k, z) => ({ k, c: 2 * z * Math.sqrt(k) });
+  const BODY = spring(95, .62);            // cube position
+  const LOOK = spring(210, .8);            // eyes + corner cut (snappier: they "look" first)
+
+  const cube  = document.getElementById("cube");
+  const eyes  = document.getElementById("eyes");
+  const shape = document.getElementById("shape");
+  const label = document.getElementById("label");
+
+  const s = { x: 0, y: 0, vx: 0, vy: 0, ex: .34, ey: .47, evx: 0, evy: 0, c: 0, cv: 0 };
+  let px = 56;
+  const measure = () => { px = cube.offsetWidth; };
+  addEventListener("resize", measure); measure();
+
+  function integrate(dt, t) {
+    const T = STOPS[(((Math.floor(t / LEG)) % 4) + 4) % 4];
+    const sub = 4, h = dt / sub;
+    for (let i = 0; i < sub; i++) {
+      s.vx  += (BODY.k * (T.x - s.x)  - BODY.c * s.vx)  * h;  s.x  += s.vx  * h;
+      s.vy  += (BODY.k * (T.y - s.y)  - BODY.c * s.vy)  * h;  s.y  += s.vy  * h;
+      s.evx += (LOOK.k * (T.ex - s.ex) - LOOK.c * s.evx) * h; s.ex += s.evx * h;
+      s.evy += (LOOK.k * (T.ey - s.ey) - LOOK.c * s.evy) * h; s.ey += s.evy * h;
+      s.cv  += (LOOK.k * (T.c - s.c)  - LOOK.c * s.cv)  * h;  s.c  += s.cv  * h;
+    }
+  }
+
+  function render() {
+    // stretch along the direction of travel, squash across it
+    const ax = Math.abs(s.vx), ay = Math.abs(s.vy);
+    let sx = 1 + .13 * ax - .05 * ay;
+    let sy = 1 + .17 * ay - .05 * ax;
+    sx = Math.min(1.3, Math.max(.84, sx));
+    sy = Math.min(1.34, Math.max(.84, sy));
+    cube.style.transform =
+      `translate(${(s.x * px).toFixed(2)}px, ${(s.y * px).toFixed(2)}px) scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`;
+
+    eyes.style.left = (s.ex * 100).toFixed(2) + "%";
+    eyes.style.top  = (s.ey * 100).toFixed(2) + "%";
+
+    // solid body: chamfered bottom-right corner, top-left corner cut grows as it turns
+    const c = Math.max(0, Math.min(1.2, s.c));
+    const a = 15 * c, b = 17 * c;
+    shape.setAttribute("points",
+      `${7 + a},7 93,7 93,57 71,81 7,81 7,${7 + b}`);
+  }
+
+  /* ---------- loop ---------- */
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let last = performance.now(), t = 0;
+  function frame(now) {
+    const dt = Math.max(0, Math.min(.05, (now - last) / 1000)); last = now; t += dt;
+    integrate(dt, t); render();
+    requestAnimationFrame(frame);
+  }
+  render();
+  if (!reduce) requestAnimationFrame(frame);
+
+  /* ---------- rotating status text ---------- */
+  let w = 0;
+  setInterval(() => {
+    label.style.opacity = 0;
+    setTimeout(() => { w = (w + 1) % WORDS.length; label.textContent = WORDS[w]; label.style.opacity = 1; }, 200);
+  }, WORD_EVERY * 1000);
+</script>
+</body>
+</html>
