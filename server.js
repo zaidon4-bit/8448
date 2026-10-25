@@ -28,7 +28,8 @@ const COOKIE_NAME = 'codecraft_session';
 const OPENCODE_PORT_BASE = 4097;
 const AI_PROXY_HOST = '127.0.0.1';
 const AI_PROXY_PORT = Number(process.env.AI_PROXY_PORT || OPENCODE_PORT_BASE);
-const SYSTEM_PROMPT_PATH = path.join(__dirname, 'opencode', 'system-prompt.txt');
+const DEFAULT_SYSTEM_PROMPT_PATH = path.join(__dirname, 'opencode', 'system-prompt.txt');
+const SYSTEM_PROMPT_PATH = path.join(DATA_DIR, 'admin-system-prompt.txt');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 const HOMES_DIR = path.join(DATA_DIR, 'opencode-home');
@@ -64,6 +65,7 @@ db.exec(`
     ai_base_url TEXT,
     ai_model_id TEXT,
     ai_api_key_encrypted TEXT,
+    reasoning_level TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS chat_messages (
@@ -83,6 +85,7 @@ for (const [name, definition] of Object.entries({
   ai_base_url: 'TEXT',
   ai_model_id: 'TEXT',
   ai_api_key_encrypted: 'TEXT',
+  reasoning_level: 'TEXT',
   subscription_source: "TEXT NOT NULL DEFAULT 'manual'",
   subscription_requested_at: 'TEXT'
 })) {
@@ -95,6 +98,30 @@ const chatColumns = new Set(db.pragma('table_info(chat_messages)').map(column =>
 if (!chatColumns.has('metadata_json')) db.exec('ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT');
 const insertMessage = db.prepare('INSERT INTO chat_messages (user_id, role, content, metadata_json) VALUES (?, ?, ?, ?)');
 const selectMessages = db.prepare('SELECT role, content, created_at, metadata_json FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?');
+
+db.exec(`CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`);
+const getAppSettingStmt = db.prepare('SELECT value FROM app_settings WHERE key = ?');
+const setAppSettingStmt = db.prepare(`INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`);
+function getAppSetting(key) {
+  const row = getAppSettingStmt.get(key);
+  return row ? row.value : null;
+}
+function setAppSetting(key, value) { setAppSettingStmt.run(key, String(value)); }
+const defaultSystemPrompt = fs.readFileSync(DEFAULT_SYSTEM_PROMPT_PATH, 'utf8').trim();
+if (getAppSetting('system_prompt') === null) setAppSetting('system_prompt', defaultSystemPrompt);
+if (!['low', 'medium', 'high'].includes(getAppSetting('reasoning_level'))) setAppSetting('reasoning_level', 'low');
+function syncRuntimeSystemPrompt() {
+  const value = String(getAppSetting('system_prompt') || defaultSystemPrompt).trim();
+  fs.writeFileSync(SYSTEM_PROMPT_PATH, `${value}\n`, { encoding: 'utf8', mode: 0o644 });
+  fs.chmodSync(SYSTEM_PROMPT_PATH, 0o644);
+}
+syncRuntimeSystemPrompt();
+
 function isActiveSubscription(user) {
   if (!user || !['active', 'trialing'].includes(user.subscription_status)) return false;
   const end = Number(user.subscription_current_period_end || 0);
@@ -124,6 +151,7 @@ function getRequestOrigin(req) {
 const proxyTokens = new Map();
 const proxyRate = new Map();
 const instances = new Map();
+const instanceStartPromises = new Map();
 let shuttingDown = false;
 
 function encryptionKey() {
@@ -287,6 +315,16 @@ const proxyServer = http.createServer((req, res) => {
           // The browser/agent sees only a neutral model alias. The server maps
           // that alias to the privately configured upstream model.
           parsed.model = aiConfig.modelId;
+          // The subscriber chooses their own reasoning level. Gemini 2.5 Pro's
+          // documented OpenAI-compatible mapping exposes low/medium/high; XHigh
+          // remains a distinct saved UI preference but maps to the provider's
+          // highest documented effort (high) instead of sending an unsupported enum.
+          if (/gemini[\s_\/-]*2\.?5[\s_\/-]*pro/i.test(aiConfig.modelId)) {
+            const preferred = user && user.reasoning_level;
+            const fallback = getAppSetting('reasoning_level') || 'low';
+            const effort = ['low', 'medium', 'high', 'xhigh'].includes(preferred) ? preferred : fallback;
+            parsed.reasoning_effort = effort === 'xhigh' ? 'high' : (['low', 'medium', 'high'].includes(effort) ? effort : 'low');
+          }
           body = Buffer.from(JSON.stringify(parsed));
         } catch {
           res.writeHead(400, { 'content-type': 'application/json' });
@@ -479,6 +517,14 @@ async function waitForOpenCode(instance, child) {
   throw new Error('OpenCode server did not become ready');
 }
 async function ensureOpenCodeForUser(user) {
+  const inFlight = instanceStartPromises.get(user.id);
+  if (inFlight) return inFlight;
+  const promise = startOpenCodeForUser(user);
+  instanceStartPromises.set(user.id, promise);
+  try { return await promise; }
+  finally { if (instanceStartPromises.get(user.id) === promise) instanceStartPromises.delete(user.id); }
+}
+async function startOpenCodeForUser(user) {
   if (!aiConfigReady(user)) throw new Error('AI service is not configured for this account');
   const existing = instances.get(user.id);
   const maxInstances = Math.max(1, Number(process.env.MAX_ACTIVE_OPENCODE_INSTANCES || 12));
@@ -542,7 +588,7 @@ async function ensureOpenCodeForUser(user) {
       // each subscriber gets a private Unix identity and workspace.
       permission: { '*': 'allow', external_directory: 'deny' },
       agent: {
-        build: { mode: 'primary', prompt: `{file:${path.join(__dirname, 'opencode', 'system-prompt.txt')}}` },
+        build: { mode: 'primary', prompt: `{file:${SYSTEM_PROMPT_PATH}}` },
         reviewer: { mode: 'subagent', description: 'Review code for correctness, security, regressions, and maintainability.', prompt: 'Review the current changes critically. Do not modify files. Identify concrete bugs, security issues, missing tests, and regressions. Return findings first, ordered by severity, and cite file paths and lines where possible.', permission: { '*': 'allow', edit: 'deny', bash: 'allow', external_directory: 'deny' } },
         tester: { mode: 'subagent', description: 'Run and diagnose relevant tests and builds.', prompt: 'Inspect project scripts and test setup, then run relevant checks. You may make minimal test-focused fixes only when explicitly asked by the parent task. Report exact commands and actual results; never invent success.', permission: { '*': 'allow', external_directory: 'deny' } },
         researcher: { mode: 'subagent', description: 'Research current technical documentation and compare solutions.', prompt: 'Use websearch to discover current primary documentation and webfetch to read relevant official pages. Cite source URLs and distinguish verified facts from inference. Do not modify files.', permission: { '*': 'allow', edit: 'deny', bash: 'deny', external_directory: 'deny' } }
@@ -562,7 +608,7 @@ async function ensureOpenCodeForUser(user) {
   let stderrTail = '';
   child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk.toString()).slice(-6000); });
   child.stdout.on('data', () => {});
-  const instance = { userId: user.id, uid: identity.uid, gid: identity.gid, workspace, homeDir, port, password, proxyToken, child, ready: false, lastUsedAt: Date.now(), stderrTail: () => stderrTail };
+  const instance = { userId: user.id, uid: identity.uid, gid: identity.gid, workspace, homeDir, port, password, proxyToken, child, ready: false, busy: true, lastUsedAt: Date.now(), stderrTail: () => stderrTail };
   instances.set(user.id, instance);
   child.on('exit', (code, signal) => {
     if (instances.get(user.id) === instance) {
@@ -574,6 +620,7 @@ async function ensureOpenCodeForUser(user) {
   try {
     await waitForOpenCode(instance, child);
     instance.ready = true;
+    instance.busy = false;
     return instance;
   } catch (err) {
     console.error(`OpenCode worker startup failed for user ${user.id}: ${String(err.message)} ${stderrTail.slice(-1000)}`);
@@ -703,6 +750,42 @@ app.get('/api/me', (req, res) => {
   attachAuth(req, res, () => res.json({ user: req.authUser ? serializeUser(req.authUser) : null }));
 });
 app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
+app.get('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    systemPrompt: getAppSetting('system_prompt') || defaultSystemPrompt,
+    defaultSystemPrompt,
+    reasoningLevel: getAppSetting('reasoning_level') || 'low',
+    reasoningNote: 'Reasoning effort is passed to Gemini 2.5 Pro through the OpenAI-compatible API when the configured model ID matches that family.'
+  });
+});
+app.patch('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : null;
+  const reasoningLevel = String(body.reasoningLevel || '').trim().toLowerCase();
+  if (systemPrompt !== null && (!systemPrompt || systemPrompt.length > 40000)) {
+    return res.status(400).json({ error: 'System Prompt must contain 1 to 40,000 characters.' });
+  }
+  if (!['low', 'medium', 'high'].includes(reasoningLevel) && body.reasoningLevel !== undefined) {
+    return res.status(400).json({ error: 'Reasoning level must be low, medium, or high.' });
+  }
+  const previousPrompt = getAppSetting('system_prompt') || defaultSystemPrompt;
+  if (systemPrompt !== null) setAppSetting('system_prompt', systemPrompt);
+  if (body.reasoningLevel !== undefined) setAppSetting('reasoning_level', reasoningLevel);
+  try {
+    if (systemPrompt !== null && systemPrompt !== previousPrompt) {
+      syncRuntimeSystemPrompt();
+      // Workers read the system prompt when their configuration starts. Restart
+      // them so the admin's prompt applies to subsequent requests.
+      for (const userId of [...instances.keys()]) stopInstance(userId);
+    }
+  } catch (err) {
+    console.error('Could not sync administrator System Prompt:', err.message);
+    return res.status(500).json({ error: 'Could not save the System Prompt to persistent storage.' });
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ ok: true, reasoningLevel: getAppSetting('reasoning_level') || 'low', promptUpdated: systemPrompt !== null && systemPrompt !== previousPrompt });
+});
 app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
   const users = db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status, subscription_source,
     subscription_requested_at, subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, created_at
@@ -814,10 +897,10 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
   if (selectUserByEmail.get(email)) return res.status(409).json({ error: 'This email is already registered. Please sign in instead.' });
   try {
     const hash = await bcrypt.hash(password, 12);
-    const result = db.prepare('INSERT INTO users(email, password_hash) VALUES(?, ?)').run(email, hash);
-    const user = selectUserById.get(Number(result.lastInsertRowid));
-    setSessionCookie(res, user.id);
-    res.status(201).json({ user: serializeUser(user) });
+    db.prepare('INSERT INTO users(email, password_hash) VALUES(?, ?)').run(email, hash);
+    // Registration intentionally does not sign the user in. The client returns
+    // to the sign-in form, where the new credentials are verified explicitly.
+    res.status(201).json({ created: true, message: 'Account created. Please sign in to continue.' });
   } catch (err) {
     if (String(err.code) === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'This email is already registered.' });
     console.error('Registration failed:', err.message);
@@ -854,6 +937,28 @@ app.post('/api/billing/portal', requireAuth, (req, res) => {
   res.status(410).json({ error: 'Subscription management is handled manually by an administrator.' });
 });
 
+app.get('/api/user/preferences', requireAuth, requireSubscription, (req, res) => {
+  const user = selectUserById.get(req.authUser.id);
+  const reasoningLevel = ['low', 'medium', 'high', 'xhigh'].includes(user && user.reasoning_level)
+    ? user.reasoning_level
+    : (getAppSetting('reasoning_level') || 'low');
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    reasoningLevel,
+    reasoningLevels: ['low', 'medium', 'high', 'xhigh'],
+    note: 'XHigh maps to the configured provider’s highest supported effort when a separate XHigh mode is unavailable.'
+  });
+});
+app.patch('/api/user/preferences', requireAuth, requireSubscription, (req, res) => {
+  const reasoningLevel = String(req.body && req.body.reasoningLevel || '').trim().toLowerCase();
+  if (!['low', 'medium', 'high', 'xhigh'].includes(reasoningLevel)) {
+    return res.status(400).json({ error: 'Choose Low, Medium, High, or XHigh.' });
+  }
+  db.prepare('UPDATE users SET reasoning_level = ? WHERE id = ?').run(reasoningLevel, req.authUser.id);
+  res.set('Cache-Control', 'no-store');
+  res.json({ ok: true, reasoningLevel });
+});
+
 app.get('/api/chat/history', requireAuth, requireSubscription, (req, res) => {
   const rows = selectMessages.all(req.authUser.id, 80).reverse().map(row => {
     let metadata = null;
@@ -862,6 +967,17 @@ app.get('/api/chat/history', requireAuth, requireSubscription, (req, res) => {
   });
   res.json({ messages: rows });
 });
+app.post('/api/chat/warmup', requireAuth, requireSubscription, (req, res) => {
+  const user = selectUserById.get(req.authUser.id);
+  if (!aiConfigReady(user)) return res.status(503).json({ error: 'AI connection is not configured for this account.' });
+  // Start OpenCode in the background while the user is viewing the workspace,
+  // rather than charging its cold-start time to the first chat response.
+  ensureOpenCodeForUser(user).catch(err => {
+    console.warn(`OpenCode warm-up did not complete for user ${user.id}: ${String(err.message || err)}`);
+  });
+  res.status(202).json({ ok: true, status: 'warming' });
+});
+
 app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req, res) => {
   const requestStartedAt = Date.now();
   const prompt = String(req.body && req.body.message || '').trim();

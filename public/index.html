@@ -104,6 +104,17 @@
         <form id="chatForm" class="composer">
           <textarea id="chatInput" rows="1" maxlength="30000" placeholder="Describe what you want to build…" aria-label="Your message" required></textarea>
           <input id="projectFiles" type="file" multiple webkitdirectory directory hidden>
+          <div class="reasoning-control-row">
+            <label for="userReasoningLevel">Thinking level</label>
+            <select id="userReasoningLevel" aria-label="Thinking level">
+              <option value="low">Low · Faster responses</option>
+              <option value="medium">Medium · Balanced</option>
+              <option value="high">High · Deeper reasoning</option>
+              <option value="xhigh">XHigh · Maximum available</option>
+            </select>
+            <span id="reasoningSaveStatus" role="status">Default</span>
+          </div>
+          <p id="reasoningLevelHelp" class="reasoning-level-help">Choose how much reasoning to use for your requests. XHigh maps to the highest supported level when needed.</p>
           <div class="composer-bottom">
             <div class="composer-left">
               <button id="uploadFiles" class="composer-tool" type="button" title="Attach project files" aria-label="Attach project files">＋</button>

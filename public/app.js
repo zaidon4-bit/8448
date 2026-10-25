@@ -5,6 +5,8 @@ let authMode = 'register';
 let currentUser = null;
 let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'Manual activation after administrator review', assistantConfigured: false, paymentsConfigured: false, manualApprovalEnabled: true };
 let busy = false;
+let currentReasoningLevel = 'low';
+let reasoningSavePromise = Promise.resolve();
 
 $('year').textContent = new Date().getFullYear();
 
@@ -23,6 +25,7 @@ function showNotice(target, message, type = 'error') {
   const el = typeof target === 'string' ? $(target) : target;
   if (!el) return;
   el.className = `notice notice-${type}`;
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
   el.textContent = message;
 }
 function hide(el) { el.classList.add('hidden'); }
@@ -130,7 +133,7 @@ function startThinkingIndicator() {
   row.setAttribute('role', 'status');
   row.setAttribute('aria-live', 'polite');
   const animation = document.createElement('iframe');
-  animation.src = '/yellow-cube-v3.html?compact=1';
+  animation.src = '/yellow-cube-v3.html?compact=1&v=20261025-fast-admin-1';
   animation.title = 'Thinking animation';
   animation.setAttribute('aria-hidden', 'true');
   animation.tabIndex = -1;
@@ -192,9 +195,45 @@ function renderUser() {
     setView('membership');
   }
 }
+function normalizeReasoningLevel(level) {
+  return ['low', 'medium', 'high', 'xhigh'].includes(String(level).toLowerCase()) ? String(level).toLowerCase() : 'low';
+}
+async function loadReasoningPreference() {
+  try {
+    const data = await request('/api/user/preferences');
+    currentReasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
+    $('userReasoningLevel').value = currentReasoningLevel;
+    $('reasoningSaveStatus').textContent = 'Saved';
+    $('reasoningLevelHelp').textContent = data.note || 'Choose a thinking level for your requests.';
+  } catch (err) {
+    $('reasoningSaveStatus').textContent = 'Default';
+    $('reasoningLevelHelp').textContent = 'The account default will be used if your preference cannot be loaded.';
+  }
+}
+$('userReasoningLevel').addEventListener('change', () => {
+  const selected = normalizeReasoningLevel($('userReasoningLevel').value);
+  $('reasoningSaveStatus').textContent = 'Saving…';
+  const select = $('userReasoningLevel'); select.disabled = true;
+  reasoningSavePromise = request('/api/user/preferences', {
+    method: 'PATCH', body: JSON.stringify({ reasoningLevel: selected })
+  }).then(data => {
+    currentReasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
+    select.value = currentReasoningLevel;
+    $('reasoningSaveStatus').textContent = 'Saved';
+  }).catch(err => {
+    select.value = currentReasoningLevel;
+    $('reasoningSaveStatus').textContent = 'Save failed';
+    showGlobal(err.message || 'Could not save your thinking level.', true);
+  }).finally(() => { select.disabled = false; });
+});
+
 async function loadHistory() {
   const box = $('chatMessages');
+  await loadReasoningPreference();
   box.innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>Your workspace is ready</h3><p>Enter a coding task or upload project files to work on in your private workspace.</p></div>';
+  // Start the worker before waiting for the history fetch, so users who pause
+  // to read old messages arrive at a warm OpenCode process.
+  request('/api/chat/warmup', { method: 'POST', body: '{}' }).catch(() => {});
   try {
     const data = await request('/api/chat/history');
     if (data.messages && data.messages.length) {
@@ -248,14 +287,53 @@ $('topLogin').addEventListener('click', () => { setView('auth'); setAuthMode('lo
 $('registerTab').addEventListener('click', () => setAuthMode('register'));
 $('loginTab').addEventListener('click', () => setAuthMode('login'));
 $('authForm').addEventListener('submit', async event => {
-  event.preventDefault(); hide($('authError'));
-  const button = $('authSubmit'); button.disabled = true; button.textContent = 'Checking…';
+  event.preventDefault();
+  hide($('authError'));
+  hide($('globalNotice'));
+  const submittedMode = authMode;
+  const button = $('authSubmit');
+  button.disabled = true;
+  button.textContent = submittedMode === 'register' ? 'Creating account…' : 'Signing in…';
   const form = new FormData(event.currentTarget);
+  const email = String(form.get('email') || '').trim();
+  const password = String(form.get('password') || '');
   try {
-    const data = await request(`/api/auth/${authMode}`, { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password') }) });
-    currentUser = data.user; event.currentTarget.reset(); renderUser(); showGlobal(authMode === 'register' ? 'Account created.' : 'Signed in successfully.');
-  } catch (err) { showNotice('authError', err.message, 'error'); }
-  finally { button.disabled = false; button.innerHTML = authMode === 'register' ? 'Create account <span>←</span>' : 'Sign in <span>→</span>'; }
+    const data = await request(`/api/auth/${submittedMode}`, {
+      method: 'POST',
+      body: JSON.stringify({ email, password })
+    });
+
+    if (submittedMode === 'register') {
+      // Registration creates the account but deliberately does not create a
+      // logged-in session. Preserve the email and ask the user to sign in.
+      currentUser = null;
+      event.currentTarget.reset();
+      setView('auth');
+      setAuthMode('login');
+      $('authForm').querySelector('[name="email"]').value = email;
+      $('authForm').querySelector('[name="password"]').value = '';
+      showNotice('authError', data.message || 'Account created successfully. Please sign in.', 'success');
+      $('authForm').querySelector('[name="password"]').focus();
+      return;
+    }
+
+    currentUser = data.user;
+    event.currentTarget.reset();
+    hide($('authError'));
+    renderUser();
+    if (currentUser && currentUser.subscriptionActive) {
+      // renderUser switches directly to the chat workspace without reloading.
+      hide($('globalNotice'));
+      $('chatInput').focus();
+    } else {
+      showGlobal('Sign-in successful. Your membership must be activated by an administrator before you can use the assistant.');
+    }
+  } catch (err) {
+    showNotice('authError', err.message || 'Unable to sign in. Please try again.', 'error');
+  } finally {
+    button.disabled = false;
+    button.innerHTML = authMode === 'register' ? 'Create account <span>←</span>' : 'Sign in <span>→</span>';
+  }
 });
 $('topLogout').addEventListener('click', async () => {
   try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } catch {}
@@ -296,9 +374,11 @@ $('chatForm').addEventListener('submit', async event => {
   if (!text) return;
   busy = true; $('chatInput').disabled = true; $('sendButton').disabled = true; hide($('chatError'));
   addMessage('user', text); $('chatInput').value = ''; resizeComposer();
+  const selectedReasoningLevel = normalizeReasoningLevel($('userReasoningLevel').value);
   const thinking = startThinkingIndicator();
   try {
-    const data = await request('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
+    await reasoningSavePromise;
+    const data = await request('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, reasoningLevel: selectedReasoningLevel }) });
     const clientDurationMs = thinking.stop();
     const metadata = {
       durationMs: Number.isFinite(Number(data.durationMs)) ? Number(data.durationMs) : clientDurationMs,

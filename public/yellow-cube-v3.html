@@ -12,8 +12,9 @@
     --eye: #1a1a1a;
     --text: #a1aec7;
   }
-  html, body { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+  html, body { height: 100%; margin: 0; background: transparent !important; background-color: rgba(0,0,0,0) !important; overflow: hidden; color-scheme: dark; }
   body { display: grid; place-items: center; position: relative; font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .particles, .loader, .cell, .cube, .cube svg { background: transparent !important; background-color: rgba(0,0,0,0) !important; }
   .particles { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
   .particles i { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: #fff0aa; opacity: .36; box-shadow: 0 0 10px #ffe8a3; animation: drift 2.7s ease-in-out infinite; }
   .particles i:nth-child(1) { left: 17%; top: 28%; animation-delay: -.3s; }
@@ -81,7 +82,7 @@
 
   const compact = new URLSearchParams(location.search).get("compact") === "1";
   if (compact) {
-    document.documentElement.style.setProperty("--S", "21px");
+    document.documentElement.style.setProperty("--S", "18px");
     document.getElementById("label").style.display = "none";
     document.querySelector(".particles").style.opacity = ".48";
   }

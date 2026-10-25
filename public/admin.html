@@ -19,6 +19,22 @@
     <div id="adminNotice" class="notice hidden" role="status"></div>
     <section id="accessDenied" class="admin-card hidden"><h2>Administrator sign-in required</h2><p>Sign in with the administrator account on the home page, then reopen this page.</p><a class="button button-primary" href="/">Go to sign in</a></section>
     <section id="adminContent" class="admin-layout hidden">
+      <section class="admin-card admin-global-settings" aria-labelledby="globalSettingsHeading">
+        <div class="card-heading"><div><h2 id="globalSettingsHeading">Assistant behavior</h2><p>Global settings applied to all subscriber workspaces.</p></div><span class="admin-status">Global</span></div>
+        <form id="globalSettingsForm" class="admin-form">
+          <label class="field"><span>Reasoning effort</span>
+            <select id="reasoningLevel">
+              <option value="low">Low — faster responses (recommended)</option>
+              <option value="medium">Medium — balanced</option>
+              <option value="high">High — deeper reasoning, usually slower</option>
+            </select>
+          </label>
+          <p class="admin-hint">For Gemini 2.5 Pro through a compatible endpoint, these levels map to low, medium, or high reasoning effort. The model cannot disable thinking entirely. Other providers may ignore this control.</p>
+          <label class="field"><span>System Prompt</span><textarea id="systemPrompt" rows="14" maxlength="40000" spellcheck="false"></textarea></label>
+          <div class="admin-actions"><button id="saveGlobalSettings" class="button button-primary" type="submit">Save assistant settings</button><button id="restoreDefaultPrompt" class="button button-quiet" type="button">Restore default prompt</button></div>
+          <p class="admin-hint">Saving the System Prompt restarts active coding workers so the new instructions load. The current value is stored in persistent service data.</p>
+        </form>
+      </section>
       <aside class="admin-card user-list-card">
         <div class="card-heading"><div><h2>Users</h2><p>Select an account to manage it.</p></div><button id="refreshUsers" class="button button-quiet" type="button" title="Refresh users">↻</button></div>
         <label class="field admin-search"><span>Search by email</span><input id="userSearch" type="search" placeholder="Search users…" autocomplete="off"></label>

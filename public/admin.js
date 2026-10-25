@@ -2,6 +2,8 @@
 const $ = id => document.getElementById(id);
 let users = [];
 let selectedId = null;
+let defaultSystemPrompt = '';
+let globalSettingsLoaded = false;
 async function api(path, options = {}) {
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -67,10 +69,38 @@ function selectUser(id) {
   $('apiStatus').style.color = user.assistantConfigured ? '#a7efd4' : '#ffabb4';
   renderUsers();
 }
+async function loadGlobalSettings() {
+  const data = await api('/api/admin/settings');
+  $('systemPrompt').value = data.systemPrompt || '';
+  defaultSystemPrompt = data.defaultSystemPrompt || data.systemPrompt || '';
+  $('reasoningLevel').value = ['low', 'medium', 'high'].includes(data.reasoningLevel) ? data.reasoningLevel : 'low';
+  globalSettingsLoaded = true;
+}
+$('globalSettingsForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!globalSettingsLoaded) return notice('Global settings have not loaded yet. Refresh the page and try again.', true);
+  const button = $('saveGlobalSettings');
+  button.disabled = true;
+  try {
+    const data = await api('/api/admin/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ systemPrompt: $('systemPrompt').value, reasoningLevel: $('reasoningLevel').value })
+    });
+    notice(data.promptUpdated ? 'Assistant settings saved. Active workers were restarted to load the new System Prompt.' : 'Assistant settings saved.');
+    await loadGlobalSettings();
+  } catch (err) { notice(err.message, true); }
+  finally { button.disabled = false; }
+});
+$('restoreDefaultPrompt').addEventListener('click', () => {
+  if (!defaultSystemPrompt) return notice('Default System Prompt has not loaded yet.', true);
+  if (window.confirm('Replace the editor contents with the built-in default prompt? Click Save assistant settings to apply it.')) $('systemPrompt').value = defaultSystemPrompt;
+});
+
 async function loadUsers(keepNotice = false) {
   $('refreshUsers').disabled = true;
   try {
     const data = await api('/api/admin/users'); users = data.users || [];
+    await loadGlobalSettings();
     $('accessDenied').classList.add('hidden'); $('adminContent').classList.remove('hidden');
     renderUsers();
     if (selectedId && users.some(user => user.id === selectedId)) selectUser(selectedId);

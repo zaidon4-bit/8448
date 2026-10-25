@@ -5,10 +5,10 @@ CodeCraft is an English-language web workspace powered by the OpenCode headless 
 ## Features
 
 - `server.js`: Express app, SQLite persistence, authentication, admin routes, encrypted per-user API credentials, manual subscription requests and approval, OpenCode process manager, private provider gateway, and upload/export endpoints.
-- `opencode/system-prompt.txt`: persistent coding-agent instructions.
+- `opencode/system-prompt.txt`: built-in default coding-agent instructions. The admin can edit the active System Prompt in `/admin`; the active value is stored on persistent disk.
 - OpenCode native tools are enabled within the user's private workspace. Hosted Exa web search and experimental LSP support are enabled. The Docker image installs language servers for common languages. Reviewer/tester/researcher subagents and bundled skills are included.
 - `Dockerfile` installs OpenCode and validates the executable and server command during image build.
-- English-only responsive UI, user messages aligned right, assistant messages aligned left, compact thinking cube, elapsed time shown in seconds and milliseconds, and provider-reported token usage when available.
+- English-only responsive UI, user messages aligned right, assistant messages aligned left, transparent compact thinking cube, elapsed time shown in seconds and milliseconds, and provider-reported token usage when available. OpenCode pre-warms when a subscribed user enters the workspace to reduce first-message cold start. The default prompt asks for concise fast answers and avoids tool calls for greetings.
 
 ## Deploy to Render
 
@@ -41,3 +41,16 @@ Stripe is not required. New accounts are inactive. A user can request activation
 ## Admin API configuration
 
 At `/admin`, select a user and enter an HTTPS API base URL, model ID, and API key. The key is encrypted with AES-256-GCM and is never returned to the browser after saving. If a default connection is configured in Render, it is used for accounts without a complete custom connection.
+
+## Admin assistant controls
+
+The `/admin` page includes a global reasoning-effort selector (`low`, `medium`, `high`) and a System Prompt editor. The default is `low` to reduce latency. For a model ID matching Gemini 2.5 Pro, the gateway passes `reasoning_effort` through the OpenAI-compatible request; upstream provider support/pass-through must be verified with a real request. The model's reasoning cannot be disabled entirely. Saving a changed System Prompt writes it to `/var/data/admin-system-prompt.txt` and restarts existing workers.
+
+
+## Subscriber reasoning controls
+
+Each subscribed user can choose Low, Medium, High, or XHigh from the chat composer. The setting is saved to that user’s account and is applied by the server-side provider proxy. The official Gemini 2.5 Pro OpenAI-compatible mapping documents Low, Medium, and High; XHigh is accepted by the application UI but maps to High for this model/API route, so it is not a distinct fourth Gemini 2.5 Pro effort level. Other providers may support different effort variants.
+## Authentication flow
+
+- Account creation does not automatically sign users in. After successful registration, the UI switches to Sign In, keeps the email, clears the password field, and displays a non-error success notice.
+- Sign-in is handled asynchronously without a full page reload. Users with an active membership go directly to the chat workspace; accounts awaiting manual membership approval remain on the membership screen.

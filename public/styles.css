@@ -88,7 +88,7 @@ body.in-workspace .message-body pre{max-width:100%;overflow:auto;direction:ltr;t
 .message-metrics{display:flex;flex-wrap:wrap;align-items:center;gap:7px 14px;margin-top:11px;color:#71809b;font:10px/1.5 'IBM Plex Mono',monospace;direction:ltr;text-align:left}
 .message-metrics span{display:inline-block}
 .thinking-row{display:flex;align-items:center;align-self:flex-start;gap:7px;width:max-content;max-width:100%;min-height:42px;margin:0 auto 22px 0;padding:5px 11px 5px 5px;border:1px solid rgba(154,176,220,.12);border-radius:14px;background:rgba(15,20,33,.6);color:#aebbd2;direction:ltr;text-align:left}
-.thinking-row iframe{display:block;flex:0 0 54px;width:54px;height:34px;border:0;overflow:hidden;background:transparent;pointer-events:none}
+.thinking-row iframe{display:block;flex:0 0 54px;width:54px;height:34px;border:0;overflow:hidden;background:transparent!important;background-color:rgba(0,0,0,0)!important;pointer-events:none}
 .thinking-label{font-size:12px;letter-spacing:.01em}
 .thinking-label::after{content:'';display:inline-block;width:12px;animation:thinking-dots 1.35s steps(4,end) infinite}
 .thinking-timer{padding-left:4px;color:#7686a3;font:10px/1 'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -118,3 +118,13 @@ body.in-workspace .thinking-timer{font-size:10px}
 body.in-workspace .message-error .message-body{color:#ffb9c1;border-left:2px solid #b95667;padding:8px 11px;background:rgba(94,25,39,.18);border-radius:0 9px 9px 0}
 body.in-workspace .message-error .message-head{color:#ffb9c1}
 @media(max-width:740px){body.in-workspace .thinking-row iframe{flex-basis:35px;width:35px;height:25px}body.in-workspace .thinking-label{font-size:10px}body.in-workspace .thinking-timer{font-size:9px}}
+
+
+body.in-workspace .reasoning-control-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:6px 2px 2px;color:#8d9bb5;font-size:10px}
+body.in-workspace .reasoning-control-row label{color:#9eabc1;white-space:nowrap}
+body.in-workspace .reasoning-control-row select{max-width:100%;border:1px solid #2a354d;background:#101827;color:#d9e4f7;border-radius:8px;padding:6px 8px;font-size:10px;outline:none}
+body.in-workspace .reasoning-control-row select:focus{border-color:#638bf0}
+body.in-workspace .reasoning-control-row select:disabled{opacity:.6}
+body.in-workspace #reasoningSaveStatus{font-size:9px;color:#6e829f}
+body.in-workspace .reasoning-level-help{margin:0;padding:0 2px 3px;font-size:9px;line-height:1.5;color:#65748e}
+@media(max-width:420px){body.in-workspace .reasoning-control-row{gap:6px}body.in-workspace .reasoning-control-row select{font-size:9px;padding:5px 6px}}
