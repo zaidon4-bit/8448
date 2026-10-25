@@ -1,47 +1,43 @@
-# CodeCraft Studio — Render deployment package
+# CodeCraft Studio — OpenCode Coding Workspace
 
-CodeCraft is an Arabic browser-based coding workspace powered by the OpenCode headless server. It includes account registration/login, an admin dashboard, encrypted per-user API settings, manual subscription approval, private workspaces, project file upload/download, a persistent coding prompt, and the yellow-cube work animation.
-
-The public UI does not reveal model-provider names, model identifiers, gateway URLs, or credentials. API settings are configured in `/admin` per account. API and MCP settings are encrypted at rest with `APP_ENCRYPTION_KEY` and never returned by admin APIs.
+CodeCraft is an English-language web workspace powered by the OpenCode headless server. It includes account registration/login, an admin dashboard, encrypted per-user API settings, manual membership approval, private workspaces, project upload/download, a persistent coding prompt, a compact animated thinking indicator, response timing, and provider-reported token usage.
 
 ## Features
 
-- `server.js`: Express app, SQLite persistence, authentication, admin routes, encrypted user API and MCP settings, manual subscription requests and approval, OpenCode process manager, private provider gateway, and upload/export endpoints.
-- `opencode/system-prompt.txt`: persistent instructions for the coding agent.
-- OpenCode's built-in tools are enabled; Exa web search and experimental LSP are enabled; language servers are installed for common languages. Reviewer/tester/researcher subagents and bundled skills are available. MCP servers are configured by the administrator for each user.
-- `Dockerfile` installs OpenCode and checks that `opencode serve` is present during image build.
-- The responsive Arabic app uses a full-screen chat and the supplied yellow-cube animation.
+- `server.js`: Express app, SQLite persistence, authentication, admin routes, encrypted per-user API credentials, manual subscription requests and approval, OpenCode process manager, private provider gateway, and upload/export endpoints.
+- `opencode/system-prompt.txt`: persistent coding-agent instructions.
+- OpenCode native tools are enabled within the user's private workspace. Hosted Exa web search and experimental LSP support are enabled. The Docker image installs language servers for common languages. Reviewer/tester/researcher subagents and bundled skills are included.
+- `Dockerfile` installs OpenCode and validates the executable and server command during image build.
+- English-only responsive UI, user messages aligned right, assistant messages aligned left, compact thinking cube, elapsed time shown in seconds and milliseconds, and provider-reported token usage when available.
 
-## Render deployment
+## Deploy to Render
 
-1. Push the contents of this directory to GitHub with `render.yaml` at the repository root.
-2. In Render choose **New → Blueprint**, connect the repository, review `render.yaml`, and create the service. It uses a paid Starter service and a persistent disk mounted at `/var/data`; check Render's current costs before deploying.
-3. Configure `ADMIN_EMAIL` and `ADMIN_PASSWORD` in Render. The password must be unique and at least 14 bytes.
-4. Render generates `SESSION_SECRET` and `APP_ENCRYPTION_KEY`; preserve both values. Changing `APP_ENCRYPTION_KEY` can make previously saved API/MCP credentials undecryptable.
-5. Set `APP_URL` to the exact public origin of your deployed app, for example `https://your-service.onrender.com`.
-6. Optional shared fallback AI values are `AI_BASE_URL`, `AI_MODEL_ID`, and `AI_API_KEY`. Prefer configuring a separate provider endpoint, model ID and key for each user from `/admin`.
-7. Open `/healthz` to verify the service is responding, then sign in with the configured admin account and visit `/admin`.
+1. Push this directory to GitHub with `render.yaml` at the repository root.
+2. In Render, choose **New → Blueprint**, connect the repository, review `render.yaml`, then create the service. It uses Docker, a Starter service, and a persistent disk mounted at `/var/data`. Check current pricing before deploying.
+3. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use a unique administrator password.
+4. Render generates `SESSION_SECRET` and `APP_ENCRYPTION_KEY`; keep their values safe. Do not rotate `APP_ENCRYPTION_KEY` after saving encrypted user credentials unless you have a migration plan.
+5. Set `APP_URL` to the exact public service origin, for example `https://your-service.onrender.com`.
+6. Configure an AI connection in `/admin` for each user, or set all three shared fallback variables `AI_BASE_URL`, `AI_MODEL_ID`, and `AI_API_KEY`. If neither path is configured for the user, the assistant will return a clear configuration error.
+7. Open `/healthz`, sign in as the administrator, then visit `/admin`.
 
-## Manual subscription approval
+## Manual membership approval
 
-Stripe is not required. A newly registered account has no active subscription. The user can press **طلب مراجعة وتفعيل الاشتراك** on the membership page; this marks a request for the administrator. After verifying payment or approval out of band, the administrator selects the user at `/admin`, enters the subscription duration in days (default 30), then presses **تأكيد الدفع وتفعيل**. Access is checked on the server and the subscription expires automatically based on its end timestamp. The **إلغاء التفعيل** action revokes access immediately. Only authenticated administrators can invoke these routes.
-
-The subscription request is informational; it does not prove payment. The administrator must independently verify payment before activating access.
+Stripe is not required. New accounts are inactive. A user can request activation from the membership page. After verifying payment or authorization separately, the administrator selects that user in `/admin`, chooses a duration in days (default 30), and activates membership. Membership access is checked by the server and expires at the configured end timestamp. The administrator can revoke access immediately. A request is not proof of payment.
 
 ## Local development
 
-- Install Node.js 22+, Git, Python 3 and build tools needed for `better-sqlite3`.
-- Copy `.env.example` to `.env`, set private values, and never commit `.env`.
+- Install Node.js 22+, Git, Python 3, and build tools required by `better-sqlite3`.
+- Copy `.env.example` to `.env`, fill in private values, and never commit `.env`.
 - Run `npm install`, then `npm start`.
-- The Docker build installs OpenCode automatically. For local use outside Docker, install the OpenCode CLI and make `opencode` available on `PATH`.
+- The Docker build installs OpenCode. For local execution outside Docker, install the OpenCode CLI separately.
 
 ## Operations and security
 
-- OpenCode is managed as a headless server. Each user gets a separate Unix identity, private home/config and workspace. Provider credentials stay in the root-owned web process and the worker receives a per-user token for a loopback gateway.
-- The app uses SQLite on a persistent disk and is designed for a single Render instance. Do not scale horizontally without migrating to a managed database and separate workers/queues.
-- A Unix UID/workspace boundary is not a complete sandbox. For a public coding service, add per-task containers/VMs, CPU/memory/process limits, outbound network controls, usage quotas, abuse monitoring and a security review before allowing arbitrary users to execute code.
-- The animation is a visual progress indicator; it does not expose private reasoning or guarantee progress.
+- Each subscriber gets a private workspace and Unix worker identity. Provider credentials stay in the web process and are injected through a loopback proxy token.
+- SQLite is stored on a persistent disk; the blueprint is designed for one Render instance. Do not scale horizontally without a managed database and worker/queue design.
+- Unix identities and directory permissions are useful boundaries but are not a complete sandbox. Before opening execution to untrusted public users, add isolated containers/VMs, CPU/memory/process limits, outbound network controls, quotas, abuse monitoring, and security review.
+- The thinking animation is only a progress indicator. Response time is measured locally. Token counts are displayed only when the connected provider reports usage; CodeCraft does not invent missing token data.
 
-## Admin and user-specific configuration
+## Admin API configuration
 
-Set `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and a stable `APP_ENCRYPTION_KEY`. Sign in and visit `/admin`. Select a user to configure an API base URL, model ID, API key, MCP JSON, account suspension, and manual subscription status. Keys are encrypted using AES-256-GCM and are never returned to the browser after saving.
+At `/admin`, select a user and enter an HTTPS API base URL, model ID, and API key. The key is encrypted with AES-256-GCM and is never returned to the browser after saving. If a default connection is configured in Render, it is used for accounts without a complete custom connection.

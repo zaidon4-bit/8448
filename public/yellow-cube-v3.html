@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -57,13 +57,13 @@
         <div class="eyes" id="eyes"><i></i><i></i></div>
       </div>
     </div>
-    <span class="label" id="label">يفكّر...</span>
+    <span class="label" id="label">Thinking...</span>
   </div>
 
 <script>
   /* ---------- settings ---------- */
   const LEG   = 0.83;                      // seconds per side (4 sides = ~3.3s loop, like the video)
-  const WORDS = ["يفكّر...", "ينفّذ...", "يفحص النتيجة..."];   // status words
+  const WORDS = ["Thinking...", "Working...", "Checking results..."];   // status words
   const WORD_EVERY = 2.7;                  // seconds
 
   // the four stops (x, y in cube sizes), where the eyes look, and how much the top-left corner is cut
@@ -78,6 +78,13 @@
   const spring = (k, z) => ({ k, c: 2 * z * Math.sqrt(k) });
   const BODY = spring(95, .62);            // cube position
   const LOOK = spring(210, .8);            // eyes + corner cut (snappier: they "look" first)
+
+  const compact = new URLSearchParams(location.search).get("compact") === "1";
+  if (compact) {
+    document.documentElement.style.setProperty("--S", "21px");
+    document.getElementById("label").style.display = "none";
+    document.querySelector(".particles").style.opacity = ".48";
+  }
 
   const cube  = document.getElementById("cube");
   const eyes  = document.getElementById("eyes");
@@ -134,10 +141,12 @@
 
   /* ---------- rotating status text ---------- */
   let w = 0;
-  setInterval(() => {
-    label.style.opacity = 0;
-    setTimeout(() => { w = (w + 1) % WORDS.length; label.textContent = WORDS[w]; label.style.opacity = 1; }, 200);
-  }, WORD_EVERY * 1000);
+  if (!compact) {
+    setInterval(() => {
+      label.style.opacity = 0;
+      setTimeout(() => { w = (w + 1) % WORDS.length; label.textContent = WORDS[w]; label.style.opacity = 1; }, 200);
+    }, WORD_EVERY * 1000);
+  }
 </script>
 </body>
 </html>

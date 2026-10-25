@@ -14,7 +14,6 @@ const net = require('node:net');
 const http = require('node:http');
 const https = require('node:https');
 const { spawn, spawnSync } = require('node:child_process');
-const { validateMcpConfig } = require('./mcp-config');
 
 process.umask(0o077);
 const app = express();
@@ -65,7 +64,6 @@ db.exec(`
     ai_base_url TEXT,
     ai_model_id TEXT,
     ai_api_key_encrypted TEXT,
-    ai_mcp_config_encrypted TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS chat_messages (
@@ -85,7 +83,6 @@ for (const [name, definition] of Object.entries({
   ai_base_url: 'TEXT',
   ai_model_id: 'TEXT',
   ai_api_key_encrypted: 'TEXT',
-  ai_mcp_config_encrypted: 'TEXT',
   subscription_source: "TEXT NOT NULL DEFAULT 'manual'",
   subscription_requested_at: 'TEXT'
 })) {
@@ -94,8 +91,10 @@ for (const [name, definition] of Object.entries({
 
 const selectUserById = db.prepare('SELECT * FROM users WHERE id = ?');
 const selectUserByEmail = db.prepare('SELECT * FROM users WHERE email = ?');
-const insertMessage = db.prepare('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)');
-const selectMessages = db.prepare('SELECT role, content, created_at FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?');
+const chatColumns = new Set(db.pragma('table_info(chat_messages)').map(column => column.name));
+if (!chatColumns.has('metadata_json')) db.exec('ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT');
+const insertMessage = db.prepare('INSERT INTO chat_messages (user_id, role, content, metadata_json) VALUES (?, ?, ?, ?)');
+const selectMessages = db.prepare('SELECT role, content, created_at, metadata_json FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?');
 function isActiveSubscription(user) {
   if (!user || !['active', 'trialing'].includes(user.subscription_status)) return false;
   const end = Number(user.subscription_current_period_end || 0);
@@ -146,11 +145,6 @@ function decryptApiKey(value) {
   return Buffer.concat([decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()]).toString('utf8');
 }
 
-function getMcpConfigForUser(user) {
-  if (!user || !user.ai_mcp_config_encrypted) return {};
-  const raw = decryptApiKey(user.ai_mcp_config_encrypted);
-  return validateMcpConfig(raw);
-}
 function getAIConfigForUser(user) {
   if (user && user.ai_api_key_encrypted && user.ai_base_url && user.ai_model_id) {
     return { baseUrl: user.ai_base_url, modelId: user.ai_model_id, apiKey: decryptApiKey(user.ai_api_key_encrypted), source: 'user' };
@@ -160,6 +154,41 @@ function getAIConfigForUser(user) {
   }
   return null;
 }
+function summarizeTokenUsage(info) {
+  const usage = info && info.usage;
+  const tokens = (info && info.tokens)
+    || (usage && usage.opencode && usage.opencode.tokens)
+    || (usage && usage.tokens)
+    || (info && info.usageMetadata)
+    || usage
+    || null;
+  if (!tokens || typeof tokens !== 'object') return null;
+  const number = (...values) => {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return Math.max(0, Math.trunc(parsed));
+    }
+    return null;
+  };
+  const input = number(tokens.input, tokens.prompt_tokens, tokens.input_tokens, tokens.promptTokenCount);
+  const output = number(tokens.output, tokens.completion_tokens, tokens.output_tokens, tokens.candidatesTokenCount);
+  const reasoning = number(tokens.reasoning, tokens.reasoning_tokens);
+  const cacheRead = number(tokens.cache && tokens.cache.read, tokens.cache_read, tokens.cacheRead,
+    tokens.cache_read_input_tokens, tokens.cachedContentTokenCount) || 0;
+  const cacheWrite = number(tokens.cache && tokens.cache.write, tokens.cache_write,
+    tokens.cache_write_5m, tokens.cache_write_1h) || 0;
+  const reportedTotal = number(tokens.total, tokens.total_tokens, tokens.totalTokens);
+  const hasNormalizedTokenBreakdown = tokens.input !== undefined || tokens.output !== undefined || tokens.cache !== undefined;
+  const total = reportedTotal !== null
+    ? reportedTotal
+    : ((input !== null && output !== null)
+        ? (input + output + (hasNormalizedTokenBreakdown ? cacheRead + cacheWrite : 0))
+        : null);
+  if (total === null && input === null && output === null && reasoning === null && !cacheRead && !cacheWrite) return null;
+  return { total, input, output, reasoning: reasoning || 0, cacheRead, cacheWrite };
+}
+
 function aiConfigReady(user = null) {
   try { const config = getAIConfigForUser(user); return !!(config && config.baseUrl && config.modelId && config.apiKey); }
   catch { return false; }
@@ -512,7 +541,6 @@ async function ensureOpenCodeForUser(user) {
       // Keep the complete built-in toolset available. Prevent cross-workspace file tools;
       // each subscriber gets a private Unix identity and workspace.
       permission: { '*': 'allow', external_directory: 'deny' },
-      mcp: getMcpConfigForUser(user),
       agent: {
         build: { mode: 'primary', prompt: `{file:${path.join(__dirname, 'opencode', 'system-prompt.txt')}}` },
         reviewer: { mode: 'subagent', description: 'Review code for correctness, security, regressions, and maintainability.', prompt: 'Review the current changes critically. Do not modify files. Identify concrete bugs, security issues, missing tests, and regressions. Return findings first, ordered by severity, and cite file paths and lines where possible.', permission: { '*': 'allow', edit: 'deny', bash: 'allow', external_directory: 'deny' } },
@@ -581,7 +609,14 @@ app.use(helmet({
   },
   crossOriginEmbedderPolicy: false
 }));
-app.use(express.static(PUBLIC_DIR, { index: 'index.html', maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0 }));
+app.use(express.static(PUBLIC_DIR, {
+  index: 'index.html',
+  maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
+  setHeaders(res, filePath) {
+    // Revalidate UI files after deployment so mobile browsers do not keep a stale Arabic/old bundle.
+    if (/\.(?:html|js|css)$/i.test(filePath)) res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  }
+}));
 
 function originGuard(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
@@ -589,10 +624,10 @@ function originGuard(req, res, next) {
   if (!origin) return next();
   try {
     if (new URL(origin).origin !== new URL(getRequestOrigin(req)).origin) {
-      return res.status(403).json({ error: 'تم رفض الطلب لأسباب أمنية. أعد تحميل الصفحة وحاول مجدداً.' });
+      return res.status(403).json({ error: 'Request blocked for security reasons. Reload the page and try again.' });
     }
   } catch {
-    return res.status(403).json({ error: 'تعذّر التحقق من مصدر الطلب.' });
+    return res.status(403).json({ error: 'Unable to verify the request origin.' });
   }
   next();
 }
@@ -621,17 +656,17 @@ function parseCookie(cookieHeader, name) {
 }
 function requireAuth(req, res, next) {
   attachAuth(req, res, () => {
-    if (!req.authUser) return res.status(401).json({ error: 'سجّل الدخول أولاً للمتابعة.' });
-    if (req.authUser.is_disabled === 1) return res.status(403).json({ error: 'تم إيقاف هذا الحساب. تواصل مع الإدارة.' });
+    if (!req.authUser) return res.status(401).json({ error: 'Please sign in to continue.' });
+    if (req.authUser.is_disabled === 1) return res.status(403).json({ error: 'This account is disabled. Contact support.' });
     next();
   });
 }
 function requireSubscription(req, res, next) {
-  if (!isActiveSubscription(req.authUser)) return res.status(402).json({ error: 'يلزم اشتراك مدفوع فعّال لاستخدام المساعد.' });
+  if (!isActiveSubscription(req.authUser)) return res.status(402).json({ error: 'An active subscription is required to use the assistant.' });
   next();
 }
 function requireAdmin(req, res, next) {
-  if (!req.authUser || req.authUser.is_admin !== 1) return res.status(403).json({ error: 'هذه الصفحة مخصصة للإدارة فقط.' });
+  if (!req.authUser || req.authUser.is_admin !== 1) return res.status(403).json({ error: 'This page is restricted to administrators.' });
   next();
 }
 function setSessionCookie(res, userId) {
@@ -658,7 +693,7 @@ bootstrapAdminAccount();
 app.get('/healthz', (req, res) => res.status(200).json({ ok: true, service: 'codecraft' }));
 app.get('/api/config', (req, res) => res.json({
   productName: process.env.PRODUCT_NAME || 'CodeCraft Studio',
-  subscriptionPriceLabel: process.env.SUBSCRIPTION_DISPLAY_PRICE || 'تفعيل يدوي بعد مراجعة الإدارة',
+  subscriptionPriceLabel: process.env.SUBSCRIPTION_DISPLAY_PRICE || 'Manual activation after administrator review',
   subscriptionApprovalMode: 'manual',
   manualApprovalEnabled: true,
   assistantConfigured: aiConfigReady(),
@@ -670,7 +705,7 @@ app.get('/api/me', (req, res) => {
 app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
 app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
   const users = db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status, subscription_source,
-    subscription_requested_at, subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, ai_mcp_config_encrypted, created_at
+    subscription_requested_at, subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, created_at
     FROM users ORDER BY id DESC LIMIT 500`).all().map(user => ({
       id: user.id,
       email: user.email,
@@ -682,7 +717,7 @@ app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
       subscriptionRequestedAt: user.subscription_requested_at || null,
       subscriptionCurrentPeriodEnd: user.subscription_current_period_end,
       apiConfigured: !!(user.ai_base_url && user.ai_model_id && user.ai_api_key_encrypted),
-      mcpConfigured: !!user.ai_mcp_config_encrypted,
+      assistantConfigured: aiConfigReady(user),
       apiBaseUrl: user.ai_base_url || '',
       modelId: user.ai_model_id || '',
       createdAt: user.created_at
@@ -692,16 +727,16 @@ app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
 });
 app.post('/api/admin/users/:id/subscription', requireAuth, requireAdmin, (req, res) => {
   const userId = Number(req.params.id);
-  if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'رقم المستخدم غير صالح.' });
+  if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
   const user = selectUserById.get(userId);
-  if (!user) return res.status(404).json({ error: 'المستخدم غير موجود.' });
+  if (!user) return res.status(404).json({ error: 'User not found.' });
   const action = String((req.body && req.body.action) || '');
-  if (!['activate', 'deactivate'].includes(action)) return res.status(400).json({ error: 'إجراء الاشتراك غير صالح.' });
+  if (!['activate', 'deactivate'].includes(action)) return res.status(400).json({ error: 'Invalid membership action.' });
 
   if (action === 'activate') {
     const rawDays = req.body && req.body.days !== undefined ? Number(req.body.days) : 30;
     if (!Number.isInteger(rawDays) || rawDays < 1 || rawDays > 3650) {
-      return res.status(400).json({ error: 'مدة الاشتراك يجب أن تكون بين يوم و3650 يوماً.' });
+      return res.status(400).json({ error: 'Membership duration must be between 1 and 3650 days.' });
     }
     const endAt = Math.floor(Date.now() / 1000) + rawDays * 86400;
     db.prepare(`UPDATE users SET subscription_status = 'active', subscription_source = 'manual',
@@ -726,42 +761,15 @@ app.post('/api/admin/users/:id/subscription', requireAuth, requireAdmin, (req, r
 
 app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
   const userId = Number(req.params.id);
-  if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'رقم المستخدم غير صالح.' });
+  if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
   const user = selectUserById.get(userId);
-  if (!user) return res.status(404).json({ error: 'المستخدم غير موجود.' });
+  if (!user) return res.status(404).json({ error: 'User not found.' });
   const body = req.body || {};
   const isDisabled = typeof body.isDisabled === 'boolean' ? Number(body.isDisabled) : user.is_disabled;
-  if (userId === req.authUser.id && isDisabled === 1) return res.status(400).json({ error: 'لا يمكنك إيقاف حساب الإدارة الذي تستخدمه حالياً.' });
+  if (userId === req.authUser.id && isDisabled === 1) return res.status(400).json({ error: 'You cannot disable the administrator account currently in use.' });
   let baseUrl = user.ai_base_url || '';
   let modelId = user.ai_model_id || '';
   let encryptedKey = user.ai_api_key_encrypted || null;
-  let encryptedMcpConfig = user.ai_mcp_config_encrypted || null;
-  if (body.clearMcpConfig === true) encryptedMcpConfig = null;
-  else if (body.mcpConfig !== undefined && String(body.mcpConfig || '').trim()) {
-    try {
-      const mcp = validateMcpConfig(String(body.mcpConfig));
-      encryptedMcpConfig = Object.keys(mcp).length ? encryptApiKey(JSON.stringify(mcp)) : null;
-    } catch (err) {
-      const messages = {
-        MCP_CONFIG_TOO_LARGE: 'إعداد MCP كبير جداً (الحد 24 كيلوبايت).',
-        MCP_CONFIG_INVALID_JSON: 'صيغة JSON الخاصة بـ MCP غير صحيحة.',
-        MCP_CONFIG_INVALID_OBJECT: 'إعداد MCP يجب أن يكون كائناً من نوع JSON.',
-        MCP_CONFIG_TOO_MANY_SERVERS: 'الحد الأقصى 12 خادم MCP لكل مستخدم.',
-        MCP_CONFIG_INVALID_NAME: 'اسم خادم MCP غير صالح.',
-        MCP_CONFIG_INVALID_SERVER: 'إعداد أحد خوادم MCP غير صالح.',
-        MCP_CONFIG_UNKNOWN_OPTION: 'يوجد خيار غير مدعوم في إعداد MCP.',
-        MCP_CONFIG_INVALID_TIMEOUT: 'مهلة MCP يجب أن تكون بين 1000 و120000 مللي ثانية.',
-        MCP_CONFIG_INVALID_URL: 'عنوان MCP غير صالح؛ استخدم HTTPS في الإنتاج.',
-        MCP_CONFIG_INVALID_HEADERS: 'ترويسات MCP غير صالحة.',
-        MCP_CONFIG_INVALID_OAUTH: 'إعداد OAuth الخاص بـ MCP غير صالح.',
-        MCP_CONFIG_INVALID_COMMAND: 'أمر خادم MCP المحلي غير صالح.',
-        MCP_CONFIG_INVALID_CWD: 'مجلد عمل MCP يجب أن يكون مساراً نسبياً داخل المشروع.',
-        MCP_CONFIG_INVALID_ENV: 'متغيرات بيئة MCP غير صالحة.',
-        MCP_CONFIG_INVALID_TYPE: 'نوع خادم MCP يجب أن يكون local أو remote.'
-      };
-      return res.status(400).json({ error: messages[err.message] || 'تعذّر التحقق من إعداد MCP.' });
-    }
-  }
   if (body.clearApiConfig === true) {
     baseUrl = ''; modelId = ''; encryptedKey = null;
   } else {
@@ -769,9 +777,9 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
     if (body.modelId !== undefined) modelId = String(body.modelId || '').trim();
     const rawKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
     if (rawKey) {
-      if (rawKey.length > 2000) return res.status(400).json({ error: 'مفتاح API أطول من الحد المسموح.' });
-      if (!baseUrl || !modelId) return res.status(400).json({ error: 'أدخل عنوان API ومعرّف النموذج مع المفتاح.' });
-      if (modelId.length > 200) return res.status(400).json({ error: 'معرّف النموذج طويل جداً.' });
+      if (rawKey.length > 2000) return res.status(400).json({ error: 'The API key is longer than the allowed limit.' });
+      if (!baseUrl || !modelId) return res.status(400).json({ error: 'Enter the API base URL and model ID along with the API key.' });
+      if (modelId.length > 200) return res.status(400).json({ error: 'The model ID is too long.' });
       try {
         const parsed = new URL(baseUrl);
         if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash || (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:')) throw new Error('invalid url');
@@ -779,32 +787,31 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
         encryptedKey = encryptApiKey(rawKey);
       } catch (err) {
         const message = err && err.message && /APP_ENCRYPTION_KEY/.test(err.message)
-          ? 'إعداد تشفير المفاتيح غير مكتمل على الخادم.'
-          : 'عنوان API غير صالح؛ استخدم عنوان HTTPS صحيحاً.';
+          ? 'Server-side credential encryption is not configured.'
+          : 'Invalid API URL. Use a valid HTTPS URL.';
         return res.status(400).json({ error: message });
       }
     } else if (!encryptedKey) {
-      if (baseUrl && process.env.NODE_ENV === 'production' && !/^https:\/\//i.test(baseUrl)) return res.status(400).json({ error: 'استخدم عنوان HTTPS في إعدادات الإنتاج.' });
-      if (modelId.length > 200) return res.status(400).json({ error: 'معرّف النموذج طويل جداً.' });
+      if (baseUrl && process.env.NODE_ENV === 'production' && !/^https:\/\//i.test(baseUrl)) return res.status(400).json({ error: 'Use an HTTPS URL in production.' });
+      if (modelId.length > 200) return res.status(400).json({ error: 'The model ID is too long.' });
     }
-    if (encryptedKey && (!baseUrl || !modelId)) return res.status(400).json({ error: 'لا يمكن ترك عنوان API أو معرّف النموذج فارغاً لمفتاح محفوظ.' });
+    if (encryptedKey && (!baseUrl || !modelId)) return res.status(400).json({ error: 'The API URL and model ID cannot be blank while an API key is saved.' });
   }
-  db.prepare('UPDATE users SET is_disabled = ?, ai_base_url = ?, ai_model_id = ?, ai_api_key_encrypted = ?, ai_mcp_config_encrypted = ? WHERE id = ?')
-    .run(isDisabled, baseUrl || null, modelId || null, encryptedKey, encryptedMcpConfig, userId);
+  db.prepare('UPDATE users SET is_disabled = ?, ai_base_url = ?, ai_model_id = ?, ai_api_key_encrypted = ? WHERE id = ?')
+    .run(isDisabled, baseUrl || null, modelId || null, encryptedKey, userId);
   stopInstance(userId);
   const updated = selectUserById.get(userId);
   res.set('Cache-Control', 'no-store');
   res.json({ user: { id: updated.id, email: updated.email, isDisabled: updated.is_disabled === 1,
     apiConfigured: !!(updated.ai_base_url && updated.ai_model_id && updated.ai_api_key_encrypted),
-    mcpConfigured: !!updated.ai_mcp_config_encrypted,
     apiBaseUrl: updated.ai_base_url || '', modelId: updated.ai_model_id || '' } });
 });
 app.post('/api/auth/register', authLimiter, async (req, res) => {
   const email = normalizeEmail(req.body && req.body.email);
   const password = String(req.body && req.body.password || '');
-  if (!validEmail(email)) return res.status(400).json({ error: 'أدخل بريداً إلكترونياً صحيحاً.' });
-  if (password.length < 10 || Buffer.byteLength(password, 'utf8') > 72) return res.status(400).json({ error: 'كلمة المرور يجب أن تكون 10 أحرف على الأقل وألا تتجاوز 72 بايت.' });
-  if (selectUserByEmail.get(email)) return res.status(409).json({ error: 'هذا البريد مسجّل بالفعل. سجّل الدخول بدلاً من إنشاء حساب جديد.' });
+  if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+  if (password.length < 10 || Buffer.byteLength(password, 'utf8') > 72) return res.status(400).json({ error: 'Password must be at least 10 characters and no more than 72 bytes.' });
+  if (selectUserByEmail.get(email)) return res.status(409).json({ error: 'This email is already registered. Please sign in instead.' });
   try {
     const hash = await bcrypt.hash(password, 12);
     const result = db.prepare('INSERT INTO users(email, password_hash) VALUES(?, ?)').run(email, hash);
@@ -812,16 +819,16 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     setSessionCookie(res, user.id);
     res.status(201).json({ user: serializeUser(user) });
   } catch (err) {
-    if (String(err.code) === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'هذا البريد مسجّل بالفعل.' });
+    if (String(err.code) === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'This email is already registered.' });
     console.error('Registration failed:', err.message);
-    res.status(500).json({ error: 'تعذّر إنشاء الحساب الآن. حاول مجدداً.' });
+    res.status(500).json({ error: 'Unable to create the account right now. Please try again.' });
   }
 });
 app.post('/api/auth/login', authLimiter, async (req, res) => {
   const email = normalizeEmail(req.body && req.body.email);
   const password = String(req.body && req.body.password || '');
   const user = selectUserByEmail.get(email);
-  if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.' });
+  if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: 'Email or password is incorrect.' });
   setSessionCookie(res, user.id);
   res.json({ user: serializeUser(user) });
 });
@@ -832,33 +839,38 @@ app.post('/api/auth/logout', (req, res) => {
 
 app.post('/api/billing/request-activation', requireAuth, (req, res) => {
   const user = selectUserById.get(req.authUser.id);
-  if (isActiveSubscription(user)) return res.status(409).json({ error: 'اشتراكك فعّال بالفعل.' });
+  if (isActiveSubscription(user)) return res.status(409).json({ error: 'Your subscription is already active.' });
   db.prepare(`UPDATE users SET subscription_requested_at = COALESCE(subscription_requested_at, CURRENT_TIMESTAMP),
     subscription_source = 'manual' WHERE id = ?`).run(user.id);
   const updated = selectUserById.get(user.id);
   res.status(202).json({ ok: true, subscriptionRequestedAt: updated.subscription_requested_at,
-    message: 'تم إرسال طلب مراجعة الاشتراك. ستقوم الإدارة بمراجعته وتفعيله يدوياً.' });
+    message: 'Your activation request has been submitted. An administrator will review and activate it manually.' });
 });
 
 app.post('/api/billing/checkout', requireAuth, (req, res) => {
-  res.status(410).json({ error: 'تأكيد الاشتراك يتم يدوياً من لوحة الإدارة. أرسل طلب مراجعة الاشتراك من صفحة العضوية.' });
+  res.status(410).json({ error: 'Subscription approval is handled manually in the admin panel. Request activation from the membership page.' });
 });
 app.post('/api/billing/portal', requireAuth, (req, res) => {
-  res.status(410).json({ error: 'إدارة الاشتراك تتم يدوياً عن طريق الإدارة.' });
+  res.status(410).json({ error: 'Subscription management is handled manually by an administrator.' });
 });
 
 app.get('/api/chat/history', requireAuth, requireSubscription, (req, res) => {
-  const rows = selectMessages.all(req.authUser.id, 80).reverse();
+  const rows = selectMessages.all(req.authUser.id, 80).reverse().map(row => {
+    let metadata = null;
+    if (row.metadata_json) { try { metadata = JSON.parse(row.metadata_json); } catch {} }
+    return { role: row.role, content: row.content, created_at: row.created_at, metadata };
+  });
   res.json({ messages: rows });
 });
 app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req, res) => {
+  const requestStartedAt = Date.now();
   const prompt = String(req.body && req.body.message || '').trim();
-  if (!prompt) return res.status(400).json({ error: 'اكتب المهمة التي تريد تنفيذها أولاً.' });
-  if (prompt.length > 30_000) return res.status(413).json({ error: 'الرسالة طويلة جداً. اختصرها إلى 30 ألف حرف.' });
+  if (!prompt) return res.status(400).json({ error: 'Enter a task before sending.' });
+  if (prompt.length > 30_000) return res.status(413).json({ error: 'Your message is too long. Keep it under 30,000 characters.' });
   const userNow = selectUserById.get(req.authUser.id);
-  if (!aiConfigReady(userNow)) return res.status(503).json({ error: 'لم تُجهّز الإدارة اتصال المساعد لهذا الحساب بعد.' });
+  if (!aiConfigReady(userNow)) return res.status(503).json({ error: 'The coding assistant is not configured for this account yet. Please contact the administrator.' });
   try {
-    if (!isActiveSubscription(userNow)) return res.status(402).json({ error: 'انتهت صلاحية الاشتراك أو يحتاج إلى تجديد.' });
+    if (!isActiveSubscription(userNow)) return res.status(402).json({ error: 'Your subscription has expired or needs renewal.' });
     const instance = await ensureOpenCodeForUser(userNow);
     instance.busy = true;
     if (!userNow.opencode_session_id) {
@@ -882,14 +894,17 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
     const payload = await response.json();
     const parts = Array.isArray(payload.parts) ? payload.parts : [];
     const answer = parts.filter(part => part && part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n\n').trim();
-    const finalText = answer || 'انتهى الطلب، لكن لم يصل نصّ قابل للعرض. افحص الملفات أو أعد صياغة المهمة.';
-    const toolsUsed = [...new Set(parts.filter(part => part && part.type === 'tool' && typeof part.tool === 'string').map(part => part.tool))].slice(0, 40);
-    insertMessage.run(userNow.id, 'user', prompt);
-    insertMessage.run(userNow.id, 'assistant', finalText);
-    res.json({ answer: finalText, toolsUsed, sessionId: userNow.opencode_session_id });
+    const finalText = answer || 'The task finished without a text response. Check the workspace files or try a more specific prompt.';
+    const toolsUsed = [...new Set(parts.filter(part => part && (part.type === 'tool' || part.type === 'tool-invocation') && typeof (part.tool || part.name) === 'string').map(part => part.tool || part.name))].slice(0, 40);
+    const durationMs = Date.now() - requestStartedAt;
+    const tokenUsage = summarizeTokenUsage(payload.info || payload.message && payload.message.info || {});
+    const metadata = { durationMs, tokenUsage };
+    insertMessage.run(userNow.id, 'user', prompt, null);
+    insertMessage.run(userNow.id, 'assistant', finalText, JSON.stringify(metadata));
+    res.json({ answer: finalText, toolsUsed, sessionId: userNow.opencode_session_id, durationMs, tokenUsage });
   } catch (err) {
     console.error(`Coding request failed for user ${req.authUser.id}:`, err && err.message ? err.message : 'unknown error');
-    res.status(502).json({ error: 'تعذّر إكمال المهمة حالياً. قد تكون الخدمة مشغولة؛ جرّب مجدداً بعد قليل.' });
+    res.status(502).json({ error: 'The task could not be completed. The coding service may be busy; please try again shortly.' });
   } finally {
     const instance = instances.get(req.authUser.id);
     if (instance) { instance.busy = false; instance.lastUsedAt = Date.now(); }
@@ -902,27 +917,27 @@ app.post('/api/chat/new', requireAuth, requireSubscription, (req, res) => {
 
 const uploadMiddleware = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 30, fields: 2, fieldSize: 40 * 1024 } }).array('files', 30);
 app.post('/api/workspace/upload', requireAuth, requireSubscription, (req, res, next) => {
-  uploadMiddleware(req, res, err => { if (err) return res.status(400).json({ error: 'تعذّر رفع الملفات. الحد الأقصى 30 ملفاً، و5 ميغابايت لكل ملف.' }); next(); });
+  uploadMiddleware(req, res, err => { if (err) return res.status(400).json({ error: 'Unable to upload files. The limit is 30 files, up to 5 MB each.' }); next(); });
 }, async (req, res) => {
   try {
     const user = selectUserById.get(req.authUser.id);
-    if (!aiConfigReady(user)) return res.status(503).json({ error: 'لم تُجهّز الإدارة اتصال المساعد لهذا الحساب بعد.' });
+    if (!aiConfigReady(user)) return res.status(503).json({ error: 'The coding assistant is not configured for this account yet. Please contact the administrator.' });
     const instance = await ensureOpenCodeForUser(user);
     const inputPaths = JSON.parse(String(req.body && req.body.paths || '[]'));
-    if (!Array.isArray(inputPaths) || inputPaths.length !== (req.files || []).length) return res.status(400).json({ error: 'قائمة الملفات غير صالحة.' });
+    if (!Array.isArray(inputPaths) || inputPaths.length !== (req.files || []).length) return res.status(400).json({ error: 'Invalid file list.' });
     const entries = [];
     for (let i = 0; i < req.files.length; i++) {
       let relative = String(inputPaths[i] || req.files[i].originalname || '').replace(/\\/g, '/');
       relative = relative.replace(/^\.\//, '');
       const parts = relative.split('/');
-      if (!relative || relative.startsWith('/') || parts.some(part => !part || part === '.' || part === '..') || relative.length > 240) return res.status(400).json({ error: 'أحد مسارات الملفات غير صالح.' });
+      if (!relative || relative.startsWith('/') || parts.some(part => !part || part === '.' || part === '..') || relative.length > 240) return res.status(400).json({ error: 'One of the file paths is invalid.' });
       if (parts.some(part => part === '.git' || part === 'node_modules' || part === '.venv' || part === 'venv')) continue;
       if (/(^|\/)\.env($|\.)/i.test(relative) || /(^|\/)(id_rsa|id_ed25519|credentials[^/]*\.json)$/i.test(relative) || /\.(pem|key|p12|pfx)$/i.test(relative)) continue;
       entries.push({ relative, file: req.files[i] });
     }
     for (const entry of entries) {
       const destination = path.resolve(instance.workspace, entry.relative);
-      if (!destination.startsWith(instance.workspace + path.sep)) return res.status(400).json({ error: 'أحد مسارات الملفات غير مسموح به.' });
+      if (!destination.startsWith(instance.workspace + path.sep)) return res.status(400).json({ error: 'One of the file paths is not allowed.' });
       const relativeParent = path.posix.dirname(entry.relative);
       let current = instance.workspace;
       if (relativeParent !== '.') {
@@ -930,7 +945,7 @@ app.post('/api/workspace/upload', requireAuth, requireSubscription, (req, res, n
           current = path.join(current, segment);
           try {
             const st = fs.lstatSync(current);
-            if (st.isSymbolicLink() || !st.isDirectory()) return res.status(400).json({ error: 'مسارات الملفات التي تتضمن روابط رمزية غير مسموحة.' });
+            if (st.isSymbolicLink() || !st.isDirectory()) return res.status(400).json({ error: 'File paths containing symbolic links are not allowed.' });
           } catch (err) {
             if (err && err.code !== 'ENOENT') throw err;
             fs.mkdirSync(current, { mode: 0o700 });
@@ -941,7 +956,7 @@ app.post('/api/workspace/upload', requireAuth, requireSubscription, (req, res, n
       }
       try {
         const targetStat = fs.lstatSync(destination);
-        if (targetStat.isSymbolicLink() || !targetStat.isFile() || targetStat.nlink > 1) return res.status(400).json({ error: 'استبدال ملف غير عادي أو رابط رمزي غير مسموح به.' });
+        if (targetStat.isSymbolicLink() || !targetStat.isFile() || targetStat.nlink > 1) return res.status(400).json({ error: 'Replacing unusual files or symbolic links is not allowed.' });
       } catch (err) { if (!err || err.code !== 'ENOENT') throw err; }
       const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | (fs.constants.O_NOFOLLOW || 0);
       const fd = fs.openSync(destination, flags, 0o600);
@@ -949,16 +964,16 @@ app.post('/api/workspace/upload', requireAuth, requireSubscription, (req, res, n
       fs.chownSync(destination, instance.uid, instance.gid);
       fs.chmodSync(destination, 0o600);
     }
-    res.json({ uploaded: entries.length, skipped: req.files.length - entries.length, message: `تم رفع ${entries.length} ملفاً إلى مساحة عملك.` });
+    res.json({ uploaded: entries.length, skipped: req.files.length - entries.length, message: `Uploaded ${entries.length} file(s) to your workspace.` });
   } catch (err) {
     console.error(`Workspace upload failed for user ${req.authUser.id}:`, err.message);
-    res.status(500).json({ error: 'تعذّر حفظ الملفات في مساحة العمل.' });
+    res.status(500).json({ error: 'Unable to save files to the workspace.' });
   }
 });
 
 app.get('/api/workspace/export', requireAuth, requireSubscription, (req, res) => {
   const workspace = path.join(WORKSPACES_DIR, String(req.authUser.id));
-  if (!fs.existsSync(workspace)) return res.status(404).json({ error: 'لا توجد ملفات مشروع لتنزيلها بعد.' });
+  if (!fs.existsSync(workspace)) return res.status(404).json({ error: 'There are no project files to download yet.' });
   const exportsDir = path.join(DATA_DIR, 'exports');
   fs.mkdirSync(exportsDir, { recursive: true, mode: 0o700 });
   const zipPath = path.join(exportsDir, `project-${req.authUser.id}-${crypto.randomBytes(6).toString('hex')}.zip`);
@@ -983,16 +998,16 @@ with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as z:
             if safe_file(rel): z.write(full, rel)
 `;
   const out = spawnSync('python3', ['-c', py, workspace, zipPath], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] });
-  if (out.status !== 0) { console.error('Project export failed:', String(out.stderr || '').slice(0, 500)); return res.status(500).json({ error: 'تعذّر تجهيز ملف المشروع للتنزيل.' }); }
+  if (out.status !== 0) { console.error('Project export failed:', String(out.stderr || '').slice(0, 500)); return res.status(500).json({ error: 'Unable to prepare the project archive for download.' }); }
   res.download(zipPath, `codecraft-project-${req.authUser.id}.zip`, err => { try { fs.unlinkSync(zipPath); } catch {} if (err && !res.headersSent) res.status(500).end(); });
 });
 
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
-  if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'حجم الطلب أكبر من الحد المسموح.' });
-  if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'صيغة الطلب غير صحيحة.' });
+  if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'Request size exceeds the allowed limit.' });
+  if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid request format.' });
   console.error('Request failed:', err && err.message ? err.message : 'unknown error');
-  return res.status(500).json({ error: 'حدث خطأ داخلي. حاول مجدداً.' });
+  return res.status(500).json({ error: 'An internal error occurred. Please try again.' });
 });
 
 const appServer = app.listen(PORT, '0.0.0.0', () => {

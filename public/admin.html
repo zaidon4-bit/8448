@@ -1,50 +1,48 @@
 <!doctype html>
-<html lang="ar" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#080b14">
-  <title>لوحة الإدارة — CodeCraft</title>
+  <title>Admin Panel — CodeCraft</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/admin.css">
   <script src="/admin.js" defer></script>
 </head>
 <body class="admin-page">
   <header class="topbar admin-topbar">
-    <a class="brand" href="/" aria-label="العودة إلى CodeCraft"><span class="brand-mark"><span></span><span></span><span></span><span></span></span><span><strong>CodeCraft</strong><small>ADMIN</small></span></a>
-    <div class="header-actions"><a class="button button-quiet" href="/">العودة للتطبيق</a></div>
+    <a class="brand" href="/" aria-label="Back to CodeCraft"><span class="brand-mark"><span></span><span></span><span></span><span></span></span><span><strong>CodeCraft</strong><small>ADMIN</small></span></a>
+    <div class="header-actions"><a class="button button-quiet" href="/">Back to app</a></div>
   </header>
   <main class="admin-shell">
-    <section class="admin-heading"><div class="eyebrow"><span class="eyebrow-dot"></span> إدارة الحسابات</div><h1>لوحة الإدارة</h1><p>إعداد اتصال برمجي منفصل لكل مستخدم والتحكم بحالة حسابه.</p></section>
+    <section class="admin-heading"><div class="eyebrow"><span class="eyebrow-dot"></span> ACCOUNT MANAGEMENT</div><h1>Admin Panel</h1><p>Assign a private AI connection to each user and manage membership access.</p></section>
     <div id="adminNotice" class="notice hidden" role="status"></div>
-    <section id="accessDenied" class="admin-card hidden"><h2>تسجيل دخول الإدارة مطلوب</h2><p>سجّل الدخول بحساب الإدارة من الصفحة الرئيسية، ثم افتح هذه الصفحة مجدداً.</p><a class="button button-primary" href="/">الذهاب لتسجيل الدخول</a></section>
+    <section id="accessDenied" class="admin-card hidden"><h2>Administrator sign-in required</h2><p>Sign in with the administrator account on the home page, then reopen this page.</p><a class="button button-primary" href="/">Go to sign in</a></section>
     <section id="adminContent" class="admin-layout hidden">
       <aside class="admin-card user-list-card">
-        <div class="card-heading"><div><h2>المستخدمون</h2><p>اختر حساباً لتعديل إعداداته.</p></div><button id="refreshUsers" class="button button-quiet" type="button" title="تحديث القائمة">↻</button></div>
-        <label class="field admin-search"><span>بحث بالبريد</span><input id="userSearch" type="search" placeholder="ابحث عن مستخدم…" autocomplete="off"></label>
-        <div id="usersList" class="users-list"><div class="admin-empty">جارٍ تحميل الحسابات…</div></div>
+        <div class="card-heading"><div><h2>Users</h2><p>Select an account to manage it.</p></div><button id="refreshUsers" class="button button-quiet" type="button" title="Refresh users">↻</button></div>
+        <label class="field admin-search"><span>Search by email</span><input id="userSearch" type="search" placeholder="Search users…" autocomplete="off"></label>
+        <div id="usersList" class="users-list"><div class="admin-empty">Loading accounts…</div></div>
       </aside>
       <section class="admin-card user-editor">
-        <div class="card-heading"><div><h2 id="editorTitle">إعداد المستخدم</h2><p id="editorSubtitle">اختر حساباً من القائمة.</p></div><span id="apiStatus" class="admin-status">غير محدد</span></div>
+        <div class="card-heading"><div><h2 id="editorTitle">User settings</h2><p id="editorSubtitle">Select an account from the list.</p></div><span id="apiStatus" class="admin-status">Not configured</span></div>
         <form id="userConfigForm" class="admin-form">
           <input id="selectedUserId" type="hidden">
-          <label class="field"><span>عنوان API الأساسي</span><input id="apiBaseUrl" type="url" placeholder="https://api.example.com/v1" dir="ltr" autocomplete="url"></label>
-          <label class="field"><span>معرّف النموذج</span><input id="modelId" type="text" placeholder="model-id" dir="ltr" maxlength="200" autocomplete="off"></label>
-          <label class="field"><span>مفتاح API</span><input id="apiKey" type="password" placeholder="أدخل مفتاحاً جديداً لتغييره" dir="ltr" autocomplete="new-password" maxlength="2000"></label>
-          <p class="admin-hint">المفتاح المحفوظ لا يمكن عرضه مجدداً. اترك الحقل فارغاً للاحتفاظ بالمفتاح الحالي.</p>
-          <label class="field"><span>إعداد خوادم MCP للمستخدم (JSON اختياري)</span><textarea id="mcpConfig" rows="10" dir="ltr" spellcheck="false" placeholder='{"context7":{"type":"remote","url":"https://your-mcp-server.example/mcp","enabled":true}}'></textarea></label>
-          <p class="admin-hint">خوادم MCP تضيف أدوات خارجية إلى OpenCode. اترك الحقل فارغاً للاحتفاظ بالإعداد المحفوظ؛ الصق JSON جديداً لاستبداله. أي أسرار داخل JSON تُشفّر على الخادم ولا تُعرض بعد الحفظ. لا تضف خادماً إلا إذا كنت تثق بمصدره وصلاحياته.</p>
-          <label class="admin-check"><input id="isDisabled" type="checkbox"><span>إيقاف حساب المستخدم ومنعه من استخدام الخدمة</span></label>
-          <section class="subscription-admin-box" aria-labelledby="subscriptionAdminHeading">
-            <div class="subscription-admin-heading"><div><h3 id="subscriptionAdminHeading">تأكيد الاشتراك يدوياً</h3><p>راجع الدفع خارج الموقع، ثم فعّل العضوية من هنا.</p></div><span id="subscriptionStatusPill" class="pill">غير مشترك</span></div>
-            <p id="subscriptionRequestInfo" class="admin-hint">لا يوجد طلب تفعيل معلّق.</p>
-            <label class="field"><span>مدة الاشتراك بالأيام</span><input id="subscriptionDays" type="number" min="1" max="3650" step="1" value="30" inputmode="numeric"></label>
-            <p id="subscriptionEndInfo" class="admin-hint">عند التفعيل، تُحسب مدة الاشتراك من وقت الموافقة.</p>
-            <div class="admin-actions"><button id="activateSubscription" class="button button-primary" type="button">تأكيد الدفع وتفعيل 30 يوماً</button><button id="deactivateSubscription" class="button button-quiet" type="button">إلغاء التفعيل</button></div>
-          </section>
-          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">حفظ إعدادات API وMCP</button><button id="clearApi" class="button button-quiet" type="button">مسح اتصال API</button><button id="clearMcp" class="button button-quiet" type="button">مسح إعداد MCP</button></div>
-          <p class="admin-hint">تفعيل العضوية يدوي فقط: لن يتم فتح مساحة العمل حتى تضغط زر التفعيل، وتُحفظ الموافقة على الخادم.</p>
+          <label class="field"><span>API base URL</span><input id="apiBaseUrl" type="url" placeholder="https://api.example.com/v1" dir="ltr" autocomplete="url"></label>
+          <label class="field"><span>Model ID</span><input id="modelId" type="text" placeholder="model-id" dir="ltr" maxlength="200" autocomplete="off"></label>
+          <label class="field"><span>API key</span><input id="apiKey" type="password" placeholder="Enter a new key to replace the saved key" dir="ltr" autocomplete="new-password" maxlength="2000"></label>
+          <p class="admin-hint">Saved keys cannot be viewed again. Leave this field empty to keep the existing key.</p>
+          <label class="admin-check"><input id="isDisabled" type="checkbox"><span>Disable this account and revoke access</span></label>
+          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">Save settings</button><button id="clearApi" class="button button-quiet" type="button">Clear custom API</button></div>
+          <p class="admin-hint">If no custom API is assigned, the app can use the server's default AI_BASE_URL, AI_MODEL_ID, and AI_API_KEY settings.</p>
         </form>
+        <section class="subscription-admin-box" aria-labelledby="subscriptionAdminHeading">
+          <div class="subscription-admin-heading"><div><h3 id="subscriptionAdminHeading">Manual membership approval</h3><p>Verify payment separately, then activate access here.</p></div><span id="subscriptionStatusPill" class="pill">Inactive</span></div>
+          <p id="subscriptionRequestInfo" class="admin-hint">No pending activation request.</p>
+          <label class="field"><span>Membership duration (days)</span><input id="subscriptionDays" type="number" min="1" max="3650" step="1" value="30" inputmode="numeric"></label>
+          <p id="subscriptionEndInfo" class="admin-hint">Membership duration starts when you approve it.</p>
+          <div class="admin-actions"><button id="activateSubscription" class="button button-primary" type="button">Verify payment and activate for 30 days</button><button id="deactivateSubscription" class="button button-quiet" type="button">Deactivate membership</button></div>
+        </section>
       </section>
     </section>
   </main>

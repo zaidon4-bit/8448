@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="ar" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#080b14">
-  <meta name="description" content="مساحة عمل برمجية ذكية لتنفيذ المهام وفحص المشاريع. اشتراك آمن ومساحة خاصة لكل مستخدم.">
-  <title>CodeCraft Studio — مساعدك البرمجي</title>
+  <meta name="description" content="A private AI coding workspace for implementing tasks, debugging, and testing projects.">
+  <title>CodeCraft Studio — AI Coding Workspace</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
@@ -17,26 +17,26 @@
       <span><strong>CodeCraft</strong><small>STUDIO</small></span>
     </a>
     <div class="header-actions">
-      <a id="topAdmin" class="button button-quiet hidden" href="/admin">لوحة الإدارة</a>
-      <span id="connectionStatus" class="connection"><i></i> جاهز للبدء</span>
-      <button id="topLogin" class="button button-quiet" type="button">تسجيل الدخول</button>
-      <button id="topLogout" class="button button-quiet hidden" type="button">تسجيل الخروج</button>
+      <a id="topAdmin" class="button button-quiet hidden" href="/admin">Admin Panel</a>
+      <span id="connectionStatus" class="connection"><i></i> Ready</span>
+      <button id="topLogin" class="button button-quiet" type="button">Sign In</button>
+      <button id="topLogout" class="button button-quiet hidden" type="button">Sign Out</button>
     </div>
   </header>
 
   <main class="shell">
     <section id="hero" class="hero">
       <div class="hero-copy">
-        <div class="eyebrow"><span class="eyebrow-dot"></span> مساحة عمل للمطورين</div>
-        <h1>حوّل أفكارك إلى<br><span class="gradient-text">كود يعمل فعلاً.</span></h1>
-        <p class="hero-description">وكيل برمجي يقرأ مشروعك، يعدّل الملفات، يشغّل الأوامر، يفحص الأخطاء، ويراجع النتيجة في مساحة عمل خاصة بك.</p>
+        <div class="eyebrow"><span class="eyebrow-dot"></span> A WORKSPACE FOR DEVELOPERS</div>
+        <h1>Turn ideas into<br><span class="gradient-text">working code.</span></h1>
+        <p class="hero-description">A coding agent that inspects your project, edits files, runs commands, fixes errors, and reviews the result in your private workspace.</p>
         <div class="hero-pills">
-          <span><b>✦</b> تنفيذ فعلي للمهام</span>
-          <span><b>⌘</b> أدوات المطوّر</span>
-          <span><b>✓</b> اختبارات ومراجعة</span>
+          <span><b>✦</b> Real task execution</span>
+          <span><b>⌘</b> Developer tools</span>
+          <span><b>✓</b> Tests and reviews</span>
         </div>
-        <button id="heroStart" class="button button-primary button-large" type="button">ابدأ الآن <span aria-hidden="true">←</span></button>
-        <p class="microcopy">يتطلب الوصول الكامل اشتراكاً فعّالاً.</p>
+        <button id="heroStart" class="button button-primary button-large" type="button">Get started <span aria-hidden="true">→</span></button>
+        <p class="microcopy">Full access requires an active membership.</p>
       </div>
       <div class="hero-visual" aria-hidden="true">
         <div class="grid-glow"></div>
@@ -47,21 +47,21 @@
             <span class="ln">03</span><span class="indent">const result = <i>await</i> implement(plan);</span>
             <span class="ln">04</span><span class="indent"><i>await</i> runTests(result);</span>
             <span class="ln">05</span><span>}</span></div>
-          <div class="window-footer"><span class="status-check">✓</span> جاهز لتنفيذ المهمة <span class="footer-pulse"></span></div>
+          <div class="window-footer"><span class="status-check">✓</span> Ready to build <span class="footer-pulse"></span></div>
         </div>
-        <div class="float-chip chip-one"><span>⌘</span> أدوات البرمجة</div>
-        <div class="float-chip chip-two"><span>✓</span> فحص وتحقق</div>
+        <div class="float-chip chip-one"><span>⌘</span> Coding tools</div>
+        <div class="float-chip chip-two"><span>✓</span> Test and verify</div>
       </div>
     </section>
 
     <section id="authSection" class="panel auth-panel hidden">
-      <div class="panel-heading"><div><div class="eyebrow">حسابك</div><h2 id="authTitle">أنشئ حسابك</h2><p>احفظ مساحة عملك واشتراكك بأمان.</p></div><div class="panel-icon">↗</div></div>
-      <div class="auth-switch"><button id="registerTab" class="switch active" type="button">حساب جديد</button><button id="loginTab" class="switch" type="button">تسجيل الدخول</button></div>
+      <div class="panel-heading"><div><div class="eyebrow">YOUR ACCOUNT</div><h2 id="authTitle">Create your account</h2><p>Save your workspace and membership securely.</p></div><div class="panel-icon">↗</div></div>
+      <div class="auth-switch"><button id="registerTab" class="switch active" type="button">Create account</button><button id="loginTab" class="switch" type="button">Sign In</button></div>
       <form id="authForm" class="form-grid">
-        <label class="field"><span>البريد الإلكتروني</span><input name="email" type="email" autocomplete="email" placeholder="you@example.com" required maxlength="254"></label>
-        <label class="field"><span>كلمة المرور</span><input name="password" type="password" autocomplete="new-password" placeholder="10 أحرف على الأقل" required minlength="10" maxlength="72"></label>
-        <p id="authHint" class="field-hint">استخدم كلمة مرور قوية لا تستخدمها في موقع آخر.</p>
-        <button id="authSubmit" class="button button-primary button-full" type="submit">إنشاء الحساب <span>←</span></button>
+        <label class="field"><span>Email address</span><input name="email" type="email" autocomplete="email" placeholder="you@example.com" required maxlength="254"></label>
+        <label class="field"><span>Password</span><input name="password" type="password" autocomplete="new-password" placeholder="At least 10 characters" required minlength="10" maxlength="72"></label>
+        <p id="authHint" class="field-hint">Use a strong password you do not use on other websites.</p>
+        <button id="authSubmit" class="button button-primary button-full" type="submit">Create account <span>→</span></button>
       </form>
       <div id="authError" class="notice notice-error hidden" role="alert"></div>
     </section>
@@ -69,17 +69,17 @@
     <section id="membershipSection" class="panel membership-panel hidden">
       <div class="membership-grid">
         <div>
-          <div class="eyebrow"><span class="eyebrow-dot"></span> العضوية</div>
-          <h2>افتح مساحة العمل الكاملة.</h2>
-          <p class="muted">يشمل الاشتراك وكيل البرمجة وأدوات قراءة الملفات وتعديلها وتشغيل الاختبارات ومراجعة النتائج. يتم تأكيد العضوية يدوياً من الإدارة.</p>
-          <div class="membership-features"><span>✓ مساحة عمل خاصة</span><span>✓ سجل المحادثات</span><span>✓ إدارة الاشتراك</span></div>
+          <div class="eyebrow"><span class="eyebrow-dot"></span> MEMBERSHIP</div>
+          <h2>Unlock your full workspace.</h2>
+          <p class="muted">Membership includes the coding agent, file editing, terminal commands, tests, and code review. Activation is approved manually by an administrator.</p>
+          <div class="membership-features"><span>✓ Private workspace</span><span>✓ Chat history</span><span>✓ Membership management</span></div>
         </div>
         <div class="price-card">
-          <span class="price-label">الاشتراك</span>
-          <strong id="priceDisplay">تفعيل يدوي بعد مراجعة الإدارة</strong>
-          <span id="membershipStatusText" class="muted small">إذا أكملت الدفع بالطريقة المتفق عليها، أرسل طلب مراجعة؛ ستؤكد الإدارة الاشتراك يدوياً.</span>
-          <button id="requestActivationButton" class="button button-primary button-full" type="button">طلب مراجعة وتفعيل الاشتراك <span>←</span></button>
-          <button id="refreshMembership" class="button button-quiet button-full" type="button">تحقق من حالة الاشتراك</button>
+          <span class="price-label">Membership</span>
+          <strong id="priceDisplay">Manual activation after administrator review</strong>
+          <span id="membershipStatusText" class="muted small">After completing payment through the agreed method, request a review. An administrator will activate your membership manually.</span>
+          <button id="requestActivationButton" class="button button-primary button-full" type="button">Request activation review <span>→</span></button>
+          <button id="refreshMembership" class="button button-quiet button-full" type="button">Refresh membership status</button>
           <div id="billingNote" class="notice hidden" role="status"></div>
         </div>
       </div>
@@ -87,31 +87,30 @@
 
     <section id="workspaceSection" class="workspace hidden">
       <aside class="workspace-sidebar">
-        <div class="profile-card"><div class="avatar" id="avatar">U</div><div class="profile-info"><strong id="userEmail">حسابك</strong><span id="subscriptionBadge" class="sub-badge">عضوية فعّالة</span></div></div>
-        <button id="newChatButton" class="button button-secondary button-full" type="button"><span>＋</span> مهمة جديدة</button>
-        <div class="sidebar-label">مساحة العمل</div>
-        <div class="sidebar-item active"><span>⌘</span><span>المساعد البرمجي</span><i></i></div>
-        <div class="sidebar-item"><span>▤</span><span>سجل المحادثات</span><small>قريباً</small></div>
+        <div class="profile-card"><div class="avatar" id="avatar">U</div><div class="profile-info"><strong id="userEmail">Your account</strong><span id="subscriptionBadge" class="sub-badge">Active membership</span></div></div>
+        <button id="newChatButton" class="button button-secondary button-full" type="button"><span>＋</span> New chat</button>
+        <div class="sidebar-label">Workspace</div>
+        <div class="sidebar-item active"><span>⌘</span><span>Coding assistant</span><i></i></div>
+        <div class="sidebar-item"><span>▤</span><span>Chat history</span><small>Coming soon</small></div>
         <div class="sidebar-spacer"></div>
-        <div class="tool-card"><div class="tool-card-icon">✧</div><strong>وكيل برمجي متكامل</strong><p>يحلل، ينفّذ، يختبر، ويراجع التغييرات.</p></div>
-        <p class="billing-managed-note">تُدار العضوية يدوياً من الإدارة.</p>
+        <div class="tool-card"><div class="tool-card-icon">✧</div><strong>Full coding agent</strong><p>Analyzes, implements, tests, and reviews changes.</p></div>
+        <p class="billing-managed-note">Membership is managed manually by an administrator.</p>
       </aside>
       <section class="chat-area">
         <div class="chat-topline" aria-hidden="true"></div>
         <div id="chatMessages" class="chat-messages" aria-live="polite">
-          <div id="emptyState" class="empty-state"><div class="empty-orbit" aria-hidden="true"><span>✳</span></div><h3>شو بدك نبني اليوم؟</h3><p>اكتب فكرتك، وخلي الباقي عليّ.</p></div>
+          <div id="emptyState" class="empty-state"><div class="empty-orbit" aria-hidden="true"><span>✳</span></div><h3>What are we building today?</h3><p>Describe your goal. I will handle the implementation.</p></div>
         </div>
-        <div id="thinkingBox" class="thinking-box hidden" role="status" aria-live="polite"><iframe src="/yellow-cube-v3.html" title="جاري التفكير والعمل" loading="eager" tabindex="-1"></iframe><span>عم بفكّر وبنفّذ…</span></div>
         <form id="chatForm" class="composer">
-          <textarea id="chatInput" rows="1" maxlength="30000" placeholder="اكتب اللي بدك تبنيه…" aria-label="رسالتك" required></textarea>
+          <textarea id="chatInput" rows="1" maxlength="30000" placeholder="Describe what you want to build…" aria-label="Your message" required></textarea>
           <input id="projectFiles" type="file" multiple webkitdirectory directory hidden>
           <div class="composer-bottom">
             <div class="composer-left">
-              <button id="uploadFiles" class="composer-tool" type="button" title="إرفاق ملفات المشروع" aria-label="إرفاق ملفات المشروع">＋</button>
-              <button id="downloadProject" class="composer-tool" type="button" title="تنزيل ملفات المشروع" aria-label="تنزيل ملفات المشروع">↓</button>
-              <div class="composer-help">Enter للإرسال · Shift + Enter لسطر جديد</div>
+              <button id="uploadFiles" class="composer-tool" type="button" title="Attach project files" aria-label="Attach project files">＋</button>
+              <button id="downloadProject" class="composer-tool" type="button" title="Download project files" aria-label="Download project files">↓</button>
+              <div class="composer-help">Enter to send · Shift + Enter for a new line</div>
             </div>
-            <button id="sendButton" class="send-button" type="submit" aria-label="إرسال الرسالة" title="إرسال">↑</button>
+            <button id="sendButton" class="send-button" type="submit" aria-label="Send message" title="Send">↑</button>
           </div>
         </form>
         <div id="chatError" class="notice notice-error hidden" role="alert"></div>
@@ -120,6 +119,6 @@
     <div id="globalNotice" class="global-notice hidden" role="status"></div>
   </main>
 
-  <footer class="site-footer"><span>© <span id="year"></span> CodeCraft Studio</span><span>صُمّم للمساعدة على بناء برمجيات أفضل.</span></footer>
+  <footer class="site-footer"><span>© <span id="year"></span> CodeCraft Studio</span><span>Built to help you ship better software.</span></footer>
 </body>
 </html>

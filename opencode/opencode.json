@@ -18,16 +18,13 @@
   "model": "managed/code-assistant",
   "default_agent": "build",
   "permission": {
-    "*": "allow"
+    "*": "allow",
+    "external_directory": "deny"
   },
-  "lsp": true,
   "agent": {
     "build": {
       "mode": "primary",
       "prompt": "{file:/app/opencode/system-prompt.txt}"
     }
-  },
-  "websearch": {
-    "provider": "exa"
   }
 }

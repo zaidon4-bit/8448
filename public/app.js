@@ -3,7 +3,7 @@
 const $ = id => document.getElementById(id);
 let authMode = 'register';
 let currentUser = null;
-let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'تفعيل يدوي بعد مراجعة الإدارة', assistantConfigured: false, paymentsConfigured: false, manualApprovalEnabled: true };
+let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'Manual activation after administrator review', assistantConfigured: false, paymentsConfigured: false, manualApprovalEnabled: true };
 let busy = false;
 
 $('year').textContent = new Date().getFullYear();
@@ -16,7 +16,7 @@ async function request(path, options = {}) {
   });
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('application/json') ? await response.json() : { error: await response.text() };
-  if (!response.ok) throw new Error(payload.error || 'تعذّر إكمال الطلب. حاول مجدداً.');
+  if (!response.ok) throw new Error(payload.error || 'Unable to complete the request. Please try again.');
   return payload;
 }
 function showNotice(target, message, type = 'error') {
@@ -88,17 +88,65 @@ function renderMarkdownSafe(container, text) {
     addInlineText(p, paragraph.join('\n')); container.append(p);
   }
 }
-function addMessage(role, content) {
+function formatElapsed(ms) {
+  const value = Math.max(0, Math.round(Number(ms) || 0));
+  return `${Math.floor(value / 1000)} s ${String(value % 1000).padStart(3, '0')} ms`;
+}
+function addMessage(role, content, metadata = null) {
   removeEmptyState();
   const wrap = document.createElement('article');
-  wrap.className = `message ${role}`;
+  wrap.className = `message ${role}${metadata && metadata.isError ? ' message-error' : ''}`;
   const head = document.createElement('div'); head.className = 'message-head';
-  const avatar = document.createElement('span'); avatar.className = 'message-avatar'; avatar.textContent = role === 'user' ? 'أنت' : '✦';
-  const label = document.createElement('span'); label.textContent = role === 'user' ? 'أنت' : 'CodeCraft';
+  const avatar = document.createElement('span'); avatar.className = 'message-avatar'; avatar.textContent = role === 'user' ? 'Y' : '✦';
+  const label = document.createElement('span'); label.textContent = role === 'user' ? 'You' : 'CodeCraft';
   head.append(avatar, label);
   const body = document.createElement('div'); body.className = 'message-body';
   renderMarkdownSafe(body, content);
-  wrap.append(head, body); $('chatMessages').append(wrap); scrollChatToBottom();
+  wrap.append(head, body);
+  if (role === 'assistant' && metadata && typeof metadata === 'object') {
+    const metrics = document.createElement('div'); metrics.className = 'message-metrics';
+    const durationMs = Number(metadata.durationMs);
+    const time = document.createElement('span');
+    time.textContent = `Response time: ${Number.isFinite(durationMs) ? formatElapsed(durationMs) : 'unavailable'}`;
+    metrics.append(time);
+    const usage = metadata.tokenUsage;
+    const tokens = document.createElement('span');
+    if (usage && usage.total !== null && usage.total !== undefined && Number.isFinite(Number(usage.total))) {
+      const details = [];
+      if (usage.input !== null && usage.input !== undefined) details.push(`${Number(usage.input).toLocaleString('en-US')} input`);
+      if (usage.output !== null && usage.output !== undefined) details.push(`${Number(usage.output).toLocaleString('en-US')} output`);
+      tokens.textContent = `Tokens used: ${Number(usage.total).toLocaleString('en-US')} total${details.length ? ` · ${details.join(' · ')}` : ''}`;
+    } else {
+      tokens.textContent = 'Token usage: unavailable (provider did not report usage)';
+    }
+    metrics.append(tokens);
+    wrap.append(metrics);
+  }
+  $('chatMessages').append(wrap); scrollChatToBottom();
+}
+function startThinkingIndicator() {
+  const row = document.createElement('div');
+  row.className = 'thinking-row';
+  row.setAttribute('role', 'status');
+  row.setAttribute('aria-live', 'polite');
+  const animation = document.createElement('iframe');
+  animation.src = '/yellow-cube-v3.html?compact=1';
+  animation.title = 'Thinking animation';
+  animation.setAttribute('aria-hidden', 'true');
+  animation.tabIndex = -1;
+  const status = document.createElement('span'); status.className = 'thinking-label'; status.textContent = 'Thinking';
+  const timer = document.createElement('span'); timer.className = 'thinking-timer'; timer.textContent = '0 s 000 ms';
+  row.append(animation, status, timer);
+  $('chatMessages').append(row);
+  const started = performance.now();
+  const tick = () => { timer.textContent = formatElapsed(performance.now() - started); };
+  tick();
+  const interval = window.setInterval(tick, 25);
+  scrollChatToBottom();
+  return {
+    row,
+    stop: () => { window.clearInterval(interval); tick(); row.remove(); return Math.round(performance.now() - started); }
+  };
 }
 
 function addToolActivity(tools) {
@@ -106,7 +154,7 @@ function addToolActivity(tools) {
   if (!names.length) return;
   const row = document.createElement('div'); row.className = 'tool-activity';
   const icon = document.createElement('span'); icon.className = 'tool-activity-dot'; icon.setAttribute('aria-hidden', 'true');
-  const label = document.createElement('span'); label.textContent = `الأدوات المستخدمة: ${names.join(' · ')}`;
+  const label = document.createElement('span'); label.textContent = `Tools used: ${names.join(' · ')}`;
   row.append(icon, label); $('chatMessages').append(row); scrollChatToBottom();
 }
 function setView(view) {
@@ -126,51 +174,51 @@ function renderUser() {
   $('userEmail').textContent = currentUser.email;
   $('avatar').textContent = (currentUser.email[0] || 'U').toUpperCase();
   if (currentUser.subscriptionActive) {
-    $('subscriptionBadge').textContent = 'عضوية فعّالة';
+    $('subscriptionBadge').textContent = 'Active membership';
     setView('workspace');
     loadHistory();
   } else {
-    $('priceDisplay').textContent = config.subscriptionPriceLabel || 'تفعيل يدوي بعد مراجعة الإدارة';
+    $('priceDisplay').textContent = config.subscriptionPriceLabel || 'Manual activation after administrator review';
     const requested = !!currentUser.subscriptionRequestedAt;
     const requestButton = $('requestActivationButton');
     if (requestButton) {
       requestButton.disabled = requested;
-      requestButton.innerHTML = requested ? 'تم إرسال طلب المراجعة ✓' : 'طلب مراجعة وتفعيل الاشتراك <span>←</span>';
+      requestButton.innerHTML = requested ? 'Review request sent ✓' : 'Request activation review <span>←</span>';
     }
     const statusText = $('membershipStatusText');
     if (statusText) statusText.textContent = requested
-      ? 'طلبك قيد المراجعة. ستقوم الإدارة بتفعيل الاشتراك بعد التأكد.'
-      : 'إذا أكملت الدفع بالطريقة المتفق عليها، أرسل طلب مراجعة؛ ستؤكد الإدارة الاشتراك يدوياً.';
+      ? 'Your request is under review. An administrator will activate membership after verification.'
+      : 'After completing payment through the agreed method, request a review. An administrator will activate membership manually.';
     setView('membership');
   }
 }
 async function loadHistory() {
   const box = $('chatMessages');
-  box.innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>مساحة عملك جاهزة</h3><p>اكتب مهمة برمجية أو ارفع ملفات مشروعك لتعمل عليها داخل مساحة العمل الخاصة بك.</p></div>';
+  box.innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>Your workspace is ready</h3><p>Enter a coding task or upload project files to work on in your private workspace.</p></div>';
   try {
     const data = await request('/api/chat/history');
     if (data.messages && data.messages.length) {
       box.innerHTML = '';
-      for (const m of data.messages) addMessage(m.role, m.content);
+      for (const m of data.messages) addMessage(m.role, m.content, m.metadata);
     }
   } catch (err) {
-    if (!/اشتراك|سجّل الدخول/.test(err.message)) showGlobal(err.message, true);
+    if (!/subscription|sign in/.test(err.message)) showGlobal(err.message, true);
   }
 }
 function setAuthMode(mode) {
   authMode = mode;
-  $('authTitle').textContent = mode === 'register' ? 'أنشئ حسابك' : 'أهلاً بعودتك';
+  $('authTitle').textContent = mode === 'register' ? 'Create your account' : 'Welcome back';
   $('registerTab').classList.toggle('active', mode === 'register');
   $('loginTab').classList.toggle('active', mode === 'login');
-  $('authSubmit').innerHTML = mode === 'register' ? 'إنشاء الحساب <span>←</span>' : 'تسجيل الدخول <span>←</span>';
+  $('authSubmit').innerHTML = mode === 'register' ? 'Create account <span>←</span>' : 'Sign in <span>→</span>';
   $('authForm').querySelector('[name="password"]').setAttribute('autocomplete', mode === 'register' ? 'new-password' : 'current-password');
   $('authForm').querySelector('[name="password"]').setAttribute('minlength', mode === 'register' ? '10' : '1');
-  $('authHint').textContent = mode === 'register' ? 'استخدم كلمة مرور قوية لا تستخدمها في موقع آخر.' : 'أدخل بيانات الحساب الذي أنشأته سابقاً.';
+  $('authHint').textContent = mode === 'register' ? 'Use a strong password you do not use on other websites.' : 'Enter the credentials for your existing account.';
   hide($('authError'));
 }
 async function loadInitial() {
   try { config = await request('/api/config'); } catch {}
-  $('priceDisplay').textContent = config.subscriptionPriceLabel || 'تفعيل يدوي بعد مراجعة الإدارة';
+  $('priceDisplay').textContent = config.subscriptionPriceLabel || 'Manual activation after administrator review';
   try {
     const data = await request('/api/me');
     currentUser = data.user;
@@ -179,20 +227,20 @@ async function loadInitial() {
 }
 async function refreshMembership(retry = false) {
   const button = $('refreshMembership');
-  if (button) { button.disabled = true; button.textContent = 'جارٍ التحقق…'; }
+  if (button) { button.disabled = true; button.textContent = 'Checking…'; }
   try {
     const tries = retry ? 4 : 1;
     for (let i = 0; i < tries; i++) {
       const data = await request('/api/me');
       currentUser = data.user;
-      if (currentUser && currentUser.subscriptionActive) { renderUser(); showGlobal('تم تفعيل العضوية بنجاح.'); return; }
+      if (currentUser && currentUser.subscriptionActive) { renderUser(); showGlobal('Membership activated successfully.'); return; }
       if (i < tries - 1) await new Promise(resolve => setTimeout(resolve, 1600));
     }
     renderUser();
     const note = $('billingNote');
-    showNotice(note, currentUser && currentUser.subscriptionRequestedAt ? 'طلبك ما زال قيد مراجعة الإدارة. حدّث الحالة لاحقاً.' : 'لم يُفعّل الاشتراك بعد. أرسل طلب مراجعة إذا أتممت الدفع بالطريقة المتفق عليها.', 'error');
+    showNotice(note, currentUser && currentUser.subscriptionRequestedAt ? 'Your activation request is still under administrator review. Refresh the status later.' : 'Membership is not active yet. Request a review after completing payment.', 'error');
   } catch (err) { showGlobal(err.message, true); }
-  finally { if (button) { button.disabled = false; button.textContent = 'تحقق من حالة الاشتراك'; } }
+  finally { if (button) { button.disabled = false; button.textContent = 'Refresh membership status'; } }
 }
 
 $('heroStart').addEventListener('click', () => { setView(currentUser ? (currentUser.subscriptionActive ? 'workspace' : 'membership') : 'auth'); if (!currentUser) setAuthMode('register'); });
@@ -201,24 +249,24 @@ $('registerTab').addEventListener('click', () => setAuthMode('register'));
 $('loginTab').addEventListener('click', () => setAuthMode('login'));
 $('authForm').addEventListener('submit', async event => {
   event.preventDefault(); hide($('authError'));
-  const button = $('authSubmit'); button.disabled = true; button.textContent = 'جارٍ التحقق…';
+  const button = $('authSubmit'); button.disabled = true; button.textContent = 'Checking…';
   const form = new FormData(event.currentTarget);
   try {
     const data = await request(`/api/auth/${authMode}`, { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password') }) });
-    currentUser = data.user; event.currentTarget.reset(); renderUser(); showGlobal(authMode === 'register' ? 'تم إنشاء حسابك.' : 'تم تسجيل الدخول.');
+    currentUser = data.user; event.currentTarget.reset(); renderUser(); showGlobal(authMode === 'register' ? 'Account created.' : 'Signed in successfully.');
   } catch (err) { showNotice('authError', err.message, 'error'); }
-  finally { button.disabled = false; button.innerHTML = authMode === 'register' ? 'إنشاء الحساب <span>←</span>' : 'تسجيل الدخول <span>←</span>'; }
+  finally { button.disabled = false; button.innerHTML = authMode === 'register' ? 'Create account <span>←</span>' : 'Sign in <span>→</span>'; }
 });
 $('topLogout').addEventListener('click', async () => {
   try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } catch {}
-  currentUser = null; renderUser(); showGlobal('تم تسجيل الخروج.');
+  currentUser = null; renderUser(); showGlobal('Signed out.');
 });
 $('requestActivationButton').addEventListener('click', async () => {
   const button = $('requestActivationButton'); button.disabled = true;
   try {
     const data = await request('/api/billing/request-activation', { method: 'POST', body: '{}' });
     const refreshed = await request('/api/me'); currentUser = refreshed.user; renderUser();
-    showNotice($('billingNote'), data.message || 'تم إرسال طلب مراجعة الاشتراك.', 'success');
+    showNotice($('billingNote'), data.message || 'Activation review request submitted.', 'success');
   } catch (err) {
     showNotice($('billingNote'), err.message, 'error');
     button.disabled = false;
@@ -226,7 +274,7 @@ $('requestActivationButton').addEventListener('click', async () => {
 });
 $('refreshMembership').addEventListener('click', () => refreshMembership(false));
 $('newChatButton').addEventListener('click', async () => {
-  try { await request('/api/chat/new', { method: 'POST', body: '{}' }); $('chatMessages').innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>مهمة جديدة</h3><p>اكتب الهدف المطلوب تنفيذه.</p></div>'; }
+  try { await request('/api/chat/new', { method: 'POST', body: '{}' }); $('chatMessages').innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>New chat</h3><p>Describe the task you want implemented.</p></div>'; }
   catch (err) { showGlobal(err.message, true); }
 });
 document.querySelectorAll('.suggestion').forEach(button => button.addEventListener('click', () => { $('chatInput').value = button.textContent.trim(); $('chatInput').focus(); }));
@@ -248,16 +296,23 @@ $('chatForm').addEventListener('submit', async event => {
   if (!text) return;
   busy = true; $('chatInput').disabled = true; $('sendButton').disabled = true; hide($('chatError'));
   addMessage('user', text); $('chatInput').value = ''; resizeComposer();
-  show($('thinkingBox')); scrollChatToBottom();
+  const thinking = startThinkingIndicator();
   try {
     const data = await request('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
-    addMessage('assistant', data.answer);
+    const clientDurationMs = thinking.stop();
+    const metadata = {
+      durationMs: Number.isFinite(Number(data.durationMs)) ? Number(data.durationMs) : clientDurationMs,
+      tokenUsage: data.tokenUsage || null
+    };
+    addMessage('assistant', data.answer, metadata);
     addToolActivity(data.toolsUsed);
   } catch (err) {
-    showNotice('chatError', err.message, 'error');
-    addMessage('assistant', 'لم أتمكن من إكمال هذه المحاولة. يمكنك إعادة الطلب بعد مراجعة الرسالة أعلاه.');
+    const durationMs = thinking.stop();
+    hide($('chatError'));
+    const detail = String(err && err.message || 'The task could not be completed. Please try again.');
+    addMessage('assistant', detail, { durationMs, tokenUsage: null, isError: true });
   } finally {
-    hide($('thinkingBox')); $('chatInput').disabled = false; $('sendButton').disabled = false; resizeComposer(); $('chatInput').focus(); busy = false;
+    $('chatInput').disabled = false; $('sendButton').disabled = false; resizeComposer(); $('chatInput').focus(); busy = false;
   }
 });
 
@@ -267,7 +322,7 @@ $('uploadFiles').addEventListener('click', () => $('projectFiles').click());
 $('projectFiles').addEventListener('change', async event => {
   const files = Array.from(event.target.files || []);
   if (!files.length) return;
-  if (files.length > 30) { showNotice('chatError', 'اختر 30 ملفاً أو أقل في كل عملية رفع.', 'error'); event.target.value = ''; return; }
+  if (files.length > 30) { showNotice('chatError', 'Select 30 files or fewer per upload.', 'error'); event.target.value = ''; return; }
   const form = new FormData();
   const paths = [];
   for (const file of files) {
@@ -275,26 +330,26 @@ $('projectFiles').addEventListener('change', async event => {
     form.append('files', file, file.name);
   }
   form.append('paths', JSON.stringify(paths));
-  const button = $('uploadFiles'); button.disabled = true; button.textContent = 'جارٍ رفع الملفات…';
+  const button = $('uploadFiles'); button.disabled = true; button.textContent = 'Uploading files…';
   try {
     const data = await request('/api/workspace/upload', { method: 'POST', body: form });
-    showGlobal(data.message || 'تم رفع الملفات إلى مساحة عملك.');
-    if (data.skipped) showGlobal(`تم تخطي ${data.skipped} ملفاً حساساً أو غير مسموح به.`, true);
+    showGlobal(data.message || 'Files uploaded to your workspace.');
+    if (data.skipped) showGlobal(`Skipped ${data.skipped} sensitive or disallowed file(s).`, true);
   } catch (err) { showNotice('chatError', err.message, 'error'); }
-  finally { button.disabled = false; button.textContent = '＋ ملفات المشروع'; event.target.value = ''; }
+  finally { button.disabled = false; button.textContent = '＋ Attach files'; event.target.value = ''; }
 });
 $('downloadProject').addEventListener('click', async () => {
-  const button = $('downloadProject'); button.disabled = true; button.textContent = 'جارٍ تجهيز المشروع…';
+  const button = $('downloadProject'); button.disabled = true; button.textContent = 'Preparing project…';
   try {
     const response = await fetch('/api/workspace/export', { credentials: 'same-origin' });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || 'تعذّر تنزيل المشروع.');
+      throw new Error(payload.error || 'Unable to download the project.');
     }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = 'codecraft-project.zip'; document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    showGlobal('بدأ تنزيل نسخة من ملفات مشروعك.');
+    showGlobal('Your project download has started.');
   } catch (err) { showNotice('chatError', err.message, 'error'); }
-  finally { button.disabled = false; button.textContent = '↓ تنزيل المشروع'; }
+  finally { button.disabled = false; button.textContent = '↓ Download project'; }
 });

@@ -6,64 +6,109 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 
-test('customer-facing assets do not reveal the configured model or gateway', () => {
-  const publicAssets = ['public/index.html', 'public/app.js', 'public/styles.css', 'public/yellow-cube-v3.html'].map(read).join('\n');
-  assert.doesNotMatch(publicAssets, /gemini|odirouter|AI_API_KEY|AI_MODEL_ID|STRIPE_SECRET_KEY/i);
+const publicFiles = ['public/index.html', 'public/app.js', 'public/styles.css', 'public/yellow-cube-v3.html'];
+const frontend = () => [...publicFiles, 'public/admin.html', 'public/admin.js', 'public/admin.css'].map(read).join('\n');
+
+test('public UI is English-only and uses a left-to-right document layout', () => {
+  const assets = frontend() + read('opencode/system-prompt.txt');
+  assert.match(read('public/index.html'), /<html lang="en" dir="ltr">/);
+  assert.match(read('public/admin.html'), /<html lang="en" dir="ltr">/);
+  assert.doesNotMatch(assets, /[\u0600-\u06FF]/);
+  const customerAssets = publicFiles.map(read).join('\n');
+  assert.doesNotMatch(customerAssets, /gemini|odirouter|AI_API_KEY|AI_MODEL_ID|STRIPE_SECRET_KEY/i);
 });
 
-test('the working animation is present and embedded in the paid workspace', () => {
-  const html = read('public/index.html');
-  const animation = read('public/yellow-cube-v3.html');
-  assert.match(html, /iframe src="\/yellow-cube-v3\.html"/);
-  assert.match(animation, /يفكّر/);
-  assert.match(animation, /ينفّذ/);
-  assert.match(animation, /class=\"particles\"/);
-  assert.match(animation, /background: transparent/);
-});
-
-test('OpenCode built-in tools, web search, and code intelligence use the supported config shape', () => {
+test('provider configuration errors explain the actual missing connection', () => {
   const server = read('server.js');
+  assert.match(server, /The coding assistant is not configured for this account yet/);
+  assert.match(server, /AI_BASE_URL && process\.env\.AI_MODEL_ID && process\.env\.AI_API_KEY/);
+  assert.match(server, /function getAIConfigForUser/);
+  assert.match(server, /process\.env\.AI_BASE_URL && process\.env\.AI_MODEL_ID && process\.env\.AI_API_KEY/);
+});
+
+test('the yellow cube is a compact animated English thinking indicator', () => {
+  const app = read('public/app.js');
+  const animation = read('public/yellow-cube-v3.html');
+  const css = read('public/styles.css');
+  assert.match(app, /function startThinkingIndicator/);
+  assert.match(app, /yellow-cube-v3\.html\?compact=1/);
+  assert.match(app, /Thinking/);
+  assert.match(animation, /<html lang="en" dir="ltr">/);
+  assert.match(animation, /Thinking\.\.\./);
+  assert.match(animation, /class="particles"/);
+  assert.match(animation, /setProperty\("--S", "21px"\)/);
+  assert.match(css, /\.thinking-row iframe\{flex-basis:39px;width:39px;height:28px/);
+});
+
+test('response metrics show seconds and milliseconds plus provider-reported tokens', () => {
+  const server = read('server.js');
+  const app = read('public/app.js');
+  assert.match(app, /function formatElapsed/);
+  assert.match(app, / s \$\{String\(value % 1000\)\.padStart\(3, '0'\)\} ms/);
+  assert.match(app, /Response time:/);
+  assert.match(app, /Tokens used:/);
+  assert.match(app, /Token usage: unavailable \(provider did not report usage\)/);
+  assert.match(server, /function summarizeTokenUsage/);
+  assert.match(server, /const tokenUsage = summarizeTokenUsage\(payload\.info/);
+  assert.match(server, /durationMs, tokenUsage/);
+  assert.match(server, /metadata_json/);
+});
+
+test('user messages align right while assistant replies and thinking state align left', () => {
+  const css = read('public/styles.css');
+  const app = read('public/app.js');
+  assert.match(css, /\.message\.user\{[^}]*align-self:flex-end/s);
+  assert.match(css, /\.message\.assistant\{[^}]*align-self:flex-start/s);
+  assert.match(css, /\.thinking-row\{[^}]*align-self:flex-start/s);
+  assert.match(app, /addMessage\('assistant', data\.answer, metadata\)/);
+  assert.match(app, /addMessage\('user', text\)/);
+});
+
+test('failed AI requests show the real English error instead of a fake success reply', () => {
+  const app = read('public/app.js');
+  assert.match(app, /addMessage\('assistant', detail, \{ durationMs, tokenUsage: null, isError: true \}\)/);
+  assert.match(read('public/styles.css'), /\.message-error \.message-body/);
+});
+
+test('OpenCode native tools, hosted web search, and experimental LSP are enabled', () => {
+  const server = read('server.js');
+  const prompt = read('opencode/system-prompt.txt');
   assert.match(server, /permission: \{ '\*': 'allow', external_directory: 'deny' \}/);
   assert.match(server, /OPENCODE_ENABLE_EXA: '1'/);
   assert.match(server, /OPENCODE_EXPERIMENTAL_LSP_TOOL: 'true'/);
-  assert.match(server, /mcp: getMcpConfigForUser\(user\)/);
+  assert.match(server, /OPENCODE_EXPERIMENTAL: 'true'/);
   assert.match(server, /mode: 'subagent'/);
-  assert.match(server, /OPENCODE_ENABLE_EXA: '1'/);
-  assert.match(server, /OPENCODE_EXPERIMENTAL_LSP_TOOL: 'true'/);
+  assert.match(prompt, /working software in the actual workspace/i);
+  assert.match(prompt, /tests/i);
+  assert.match(prompt, /Never reveal credentials/i);
 });
 
-test('Docker installs OpenCode itself and verifies the executable at image build time', () => {
+test('Docker installs OpenCode and checks its CLI and server command', () => {
   const docker = read('Dockerfile');
+  const server = read('server.js');
   assert.match(docker, /npm install --global opencode-ai/);
   assert.match(docker, /opencode --version/);
   assert.match(docker, /opencode serve --help/);
   assert.match(docker, /typescript-language-server/);
   assert.match(docker, /pyright/);
   assert.match(docker, /bash-language-server/);
-  const server = read('server.js');
   assert.match(server, /spawn\('opencode', \['serve', '--hostname', '127\.0\.0\.1', '--port', String\(port\)\]/);
 });
 
-test('subscribed workspace is a distraction-free fullscreen chat with upload and download actions in the composer', () => {
-  const html = read('public/index.html');
-  const css = read('public/styles.css');
-  assert.match(html, /id="chatInput"/);
-  assert.match(html, /id="thinkingBox"/);
-  assert.match(html, /id="uploadFiles"/);
-  assert.match(html, /id="downloadProject"/);
-  assert.match(css, /body\.in-workspace \.workspace\{position:fixed;inset:0/);
-  assert.match(css, /body\.in-workspace \.workspace-sidebar\{display:none/);
+test('Render keeps persistent storage and declares optional default API credentials', () => {
+  const render = read('render.yaml');
+  assert.match(render, /mountPath: \/var\/data/);
+  assert.match(render, /healthCheckPath: \/healthz/);
+  assert.match(render, /key: ADMIN_EMAIL/);
+  assert.match(render, /key: ADMIN_PASSWORD/);
+  assert.match(render, /key: APP_ENCRYPTION_KEY/);
+  assert.match(render, /key: AI_BASE_URL/);
+  assert.match(render, /key: AI_MODEL_ID/);
+  assert.match(render, /key: AI_API_KEY/);
+  assert.match(render, /Manual activation after administrator review/);
 });
 
-test('the OpenCode prompt covers implementation, testing, and secret handling', () => {
-  const prompt = read('opencode/system-prompt.txt');
-  assert.match(prompt, /working software in the actual workspace/i);
-  assert.match(prompt, /tests/i);
-  assert.match(prompt, /Never reveal credentials/i);
-  assert.match(prompt, /model providers/i);
-});
-
-test('subscription approval is manual in the admin panel and gated server-side', () => {
+test('manual subscription approval is enforced on the server', () => {
   const server = read('server.js');
   const admin = read('public/admin.html');
   const adminJs = read('public/admin.js');
@@ -72,37 +117,18 @@ test('subscription approval is manual in the admin panel and gated server-side',
   assert.match(server, /subscription_status = 'active', subscription_source = 'manual'/);
   assert.match(server, /subscription_requested_at = NULL/);
   assert.match(server, /rawDays < 1 \|\| rawDays > 3650/);
-  assert.match(server, /end > Math\.floor\(Date\.now\(\) \/ 1000\)/);
-  assert.match(server, /app\.post\('\/api\/billing\/request-activation', requireAuth/);
-  assert.doesNotMatch(read('package.json'), /\"stripe\"/);
   assert.match(server, /function requireSubscription/);
   assert.match(admin, /id="activateSubscription"/);
   assert.match(admin, /id="deactivateSubscription"/);
   assert.match(adminJs, /updateSubscription\('activate'\)/);
   assert.match(app, /\/api\/billing\/request-activation/);
-  assert.match(app, /ستؤكد الإدارة الاشتراك يدوياً/);
+  assert.doesNotMatch(read('package.json'), /"stripe"/);
 });
 
-test('Render configuration preserves data and exposes health check', () => {
-  const render = read('render.yaml');
-  assert.match(render, /mountPath: \/var\/data/);
-  assert.match(render, /healthCheckPath: \/healthz/);
-  assert.match(render, /ADMIN_PASSWORD/);
-});
-
-test('each subscriber is configured with a private workspace and separate worker UID', () => {
-  const server = read('server.js');
-  assert.match(server, /uidForUser\(userId\)/);
-  assert.match(server, /WORKSPACES_DIR/);
-  assert.match(server, /uid: identity\.uid/);
-  assert.match(server, /mode: 0o700/);
-});
-
-test('admin panel assigns per-user API credentials without returning stored secrets', () => {
+test('admin can assign encrypted per-user API credentials without exposing saved keys', () => {
   const server = read('server.js');
   const html = read('public/admin.html');
   const js = read('public/admin.js');
-  const render = read('render.yaml');
   assert.match(server, /aes-256-gcm/);
   assert.match(server, /APP_ENCRYPTION_KEY/);
   assert.match(server, /app\.get\('\/api\/admin\/users'/);
@@ -110,31 +136,23 @@ test('admin panel assigns per-user API credentials without returning stored secr
   assert.match(server, /function requireAdmin/);
   assert.match(server, /bootstrapAdminAccount\(\)/);
   assert.match(html, /id="apiKey"/);
-  assert.match(html, /id="mcpConfig"/);
-  assert.match(html, /id="clearMcp"/);
-  assert.match(server, /ai_mcp_config_encrypted/);
-  assert.match(server, /require\('\.\/mcp-config'\)/);
-  assert.match(read('mcp-config.js'), /function validateMcpConfig/);
-  assert.match(js, /clearMcpConfig: true/);
-  assert.match(js, /مفتاح محفوظ/);
-  assert.match(render, /key: ADMIN_EMAIL/);
-  assert.match(render, /key: ADMIN_PASSWORD/);
-  assert.match(render, /key: APP_ENCRYPTION_KEY/);
+  assert.match(html, /id="apiBaseUrl"/);
+  assert.match(html, /id="modelId"/);
+  assert.match(js, /Saved key; enter a new key to replace it/);
+  assert.match(server, /assistantConfigured: aiConfigReady\(user\)/);
   assert.doesNotMatch(server, /apiKey:\s*user\.ai_api_key_encrypted/);
 });
 
-
-test('OpenCode native tools remain enabled while external directory reads stay within workspace', () => {
+test('each subscriber receives a private workspace and a distinct worker identity', () => {
   const server = read('server.js');
-  assert.match(server, /permission: \{ '\*': 'allow', external_directory: 'deny' \}/);
-  assert.match(server, /OPENCODE_EXPERIMENTAL: 'true'/);
-  assert.match(server, /mcp: getMcpConfigForUser\(user\)/);
-  assert.match(server, /ai_mcp_config_encrypted/);
+  assert.match(server, /uidForUser\(userId\)/);
+  assert.match(server, /WORKSPACES_DIR/);
+  assert.match(server, /uid: identity\.uid/);
+  assert.match(server, /mode: 0o700/);
 });
 
-test('Bundled agent skills follow the OpenCode SKILL.md layout', () => {
-  const skills = ['code-review', 'web-research', 'test-debugging'];
-  for (const name of skills) {
+test('bundled OpenCode skills use the supported SKILL.md layout', () => {
+  for (const name of ['code-review', 'web-research', 'test-debugging']) {
     const content = read(`opencode/skills/${name}/SKILL.md`);
     assert.match(content, new RegExp(`name: ${name}`));
     assert.match(content, /description:/);
@@ -142,8 +160,7 @@ test('Bundled agent skills follow the OpenCode SKILL.md layout', () => {
   assert.match(read('server.js'), /seedUserSkills/);
 });
 
-
-test('chat displays safe tool-name activity summaries returned by OpenCode', () => {
+test('tool activity reports only safe tool names returned by OpenCode', () => {
   const client = read('public/app.js');
   const server = read('server.js');
   assert.match(client, /function addToolActivity/);
@@ -151,33 +168,8 @@ test('chat displays safe tool-name activity summaries returned by OpenCode', () 
   assert.match(server, /const toolsUsed = \[\.\.\.new Set/);
 });
 
-
-test('MCP config validator accepts secure remote and local definitions', () => {
-  const { validateMcpConfig } = require('../mcp-config');
-  const remote = validateMcpConfig(JSON.stringify({ docs: {
-    type: 'remote', url: 'https://mcp.example.com/mcp', enabled: true,
-    headers: { Authorization: 'Bearer placeholder' }, oauth: false, timeout: 12000
-  } }));
-  assert.equal(remote.docs.type, 'remote');
-  assert.equal(remote.docs.oauth, false);
-  const local = validateMcpConfig({ github: {
-    type: 'local', command: ['npx', '-y', '@example/mcp'], enabled: true,
-    environment: { API_TOKEN: 'placeholder' }
-  } });
-  assert.equal(local.github.type, 'local');
-  assert.equal(local.github.command[0], 'npx');
-});
-
-test('MCP config validator rejects malformed, insecure production, and oversized settings', () => {
-  const { validateMcpConfig } = require('../mcp-config');
-  assert.throws(() => validateMcpConfig('{bad'), /MCP_CONFIG_INVALID_JSON/);
-  assert.throws(() => validateMcpConfig({ local: { type: 'local', command: [] } }), /MCP_CONFIG_INVALID_COMMAND/);
-  const prior = process.env.NODE_ENV;
-  process.env.NODE_ENV = 'production';
-  try {
-    assert.throws(() => validateMcpConfig({ remote: { type: 'remote', url: 'http://mcp.example.com' } }), /MCP_CONFIG_INVALID_URL/);
-  } finally {
-    if (prior === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prior;
-  }
-  assert.throws(() => validateMcpConfig(' '.repeat(24001)), /MCP_CONFIG_TOO_LARGE/);
+test('static assets use cache revalidation so a redeploy replaces stale UI', () => {
+  const server = read('server.js');
+  assert.match(server, /setHeaders/);
+  assert.match(server, /no-cache, must-revalidate/);
 });

@@ -1,63 +1,61 @@
-# دليل النشر على Render — CodeCraft Studio
+# CodeCraft Studio — Render Deployment Guide
 
-هذا الدليل لصاحب المشروع. الموافقة على الاشتراكات يدوياً من لوحة الإدارة، ولا يحتاج النظام إلى Stripe.
+This release uses English-only website UI and manual membership approval. No payment gateway or external connector integration is required.
 
-## 1) رفع المشروع
+## 1. Upload to GitHub
 
-1. ارفع محتويات مجلد `codecraft-render-app` إلى جذر مستودع GitHub، بحيث يكون `render.yaml` في الجذر.
-2. لا ترفع ملف `.env` الحقيقي أو مفاتيح API أو كلمات المرور.
+Push the contents of this directory to the repository root, keeping `render.yaml` at the root. Never commit a real `.env` file, provider credentials, or administrator passwords.
 
-## 2) إنشاء خدمة Render
+## 2. Create the Render service
 
-1. افتح Render واختر **New → Blueprint**.
-2. اربط مستودع GitHub الذي يحتوي `render.yaml`.
-3. راجع إعدادات الخدمة قبل إنشائها. يستخدم الإعداد Docker وخطة Starter مدفوعة وقرصاً دائماً عند `/var/data` لحفظ الحسابات وملفات المشاريع وسجل المحادثات. تحقق من السعر في Render قبل الموافقة.
-4. بعد انتهاء البناء، افتح رابط الخدمة الذي يظهر في لوحة Render.
+1. Open Render and choose **New → Blueprint**.
+2. Connect the GitHub repository and review the Blueprint.
+3. The service uses Docker, the Starter plan, and a 2 GB persistent disk mounted at `/var/data`. Check Render's current price before deploying.
+4. After the deploy succeeds, open the public service URL shown by Render.
 
-## 3) متغيرات Environment
+## 3. Environment variables
 
-في صفحة **Environment** تأكد من وجود المتغيرات التالية:
+Required:
 
-- `NODE_ENV` = `production`
-- `DATA_DIR` = `/var/data`
-- `SESSION_SECRET` = قيمة عشوائية يولّدها Render؛ لا تغيّرها دون داعٍ.
-- `APP_ENCRYPTION_KEY` = قيمة سرية عشوائية ثابتة. احتفظ بها بأمان؛ تغييرها يمنع فك تشفير مفاتيح API وMCP المحفوظة سابقاً.
-- `ADMIN_EMAIL` = بريد حساب الإدارة.
-- `ADMIN_PASSWORD` = كلمة مرور فريدة لا تقل عن 14 بايت.
-- `APP_URL` = الرابط العام الدقيق لخدمة Render، مثل `https://اسم-الخدمة.onrender.com`.
-- اختيارياً `AI_BASE_URL` و`AI_MODEL_ID` و`AI_API_KEY` = اتصال افتراضي مشترك. بدلاً من ذلك، أدخل اتصالاً منفصلاً لكل مستخدم من `/admin`.
-- `SUBSCRIPTION_DISPLAY_PRICE` = نص وصفي، مثلاً `اشتراك شهري — التفعيل بعد المراجعة`.
-- `MAX_ACTIVE_OPENCODE_INSTANCES` و`AI_REQUESTS_PER_MINUTE` = الحدود الافتراضية الموجودة في `render.yaml`.
+- `NODE_ENV=production`
+- `DATA_DIR=/var/data`
+- `SESSION_SECRET`: a strong, random secret of at least 32 characters.
+- `APP_ENCRYPTION_KEY`: a separate stable random secret. Keep it safe; changing it can make stored API keys unreadable.
+- `ADMIN_EMAIL`: administrator login email.
+- `ADMIN_PASSWORD`: unique administrator password, at least 14 bytes.
+- `APP_URL`: exact public Render origin.
 
-لا توجد حاجة إلى متغيرات Stripe في وضع الموافقة اليدوية.
+AI connection: choose one route.
 
-## 4) تفعيل الاشتراك يدوياً
+- Shared default: set `AI_BASE_URL`, `AI_MODEL_ID`, and `AI_API_KEY` together in Render.
+- Per-user credentials: sign in as admin and configure the endpoint, model ID, and key for each account at `/admin`.
 
-1. افتح رابط الموقع وسجّل الدخول باستخدام البريد وكلمة المرور المحددين في `ADMIN_EMAIL` و`ADMIN_PASSWORD`.
-2. افتح `/admin` من الموقع أو من الرابط `https://اسم-الخدمة.onrender.com/admin`.
-3. سيظهر المستخدمون في القائمة. المستخدم الذي يضغط **طلب مراجعة وتفعيل الاشتراك** من صفحة العضوية سيظهر عنده في لوحة الإدارة «طلب تفعيل معلّق».
-4. تحقّق بنفسك من الدفع أو الموافقة خارج الموقع. طلب التفعيل ليس إثباتاً للدفع.
-5. اختر المستخدم من لوحة الإدارة، حدّد مدة الاشتراك بالأيام (الافتراضي 30)، واضغط **تأكيد الدفع وتفعيل 30 يوماً**. يُفعّل الخادم الوصول لمدة المدة المحددة.
-6. لإلغاء وصول المستخدم، اضغط **إلغاء التفعيل**. يتوقف وصوله إلى أدوات المساعد فوراً.
-7. يضغط المستخدم **تحقق من حالة الاشتراك** بعد الموافقة لفتح مساحة العمل.
+If neither route fully configures a user's connection, their chat will report that the AI connection is not configured. Removing connector integrations does not remove the need for a valid model API connection.
 
-## 5) اختبار النشر
+Optional defaults in the Blueprint are `MAX_ACTIVE_OPENCODE_INSTANCES=2`, `AI_REQUESTS_PER_MINUTE=15`, and `SUBSCRIPTION_DISPLAY_PRICE=Manual activation after administrator review`.
 
-1. افتح `https://اسم-الخدمة.onrender.com/healthz` وتأكد من ظهور `ok: true`.
-2. سجّل حساب مستخدم عادي وتأكد أنه لا يستطيع فتح مساحة العمل قبل الموافقة.
-3. من لوحة الإدارة فعّل الاشتراك لمدة يوم للتجربة، ثم سجّل دخول المستخدم وتأكد من فتح الشات.
-4. ألغِ التفعيل وتأكد أن الشات لم يعد متاحاً.
-5. اختبر طلب مراجعة الاشتراك، وانتهاء المدة، وعودة الخدمة بعد إعادة التشغيل.
-6. جرّب مهمة برمجية حقيقية لاختبار اتصال الموديل وأدوات OpenCode؛ نجاح بناء Docker وحده لا يثبت أن مزوّد النموذج يدعم استدعاء الأدوات.
+## 4. Manual membership approval
 
-## 6) لوحة الإدارة وإعداد API/MCP لكل مستخدم
+1. A user registers and requests membership review.
+2. The administrator independently verifies the payment/approval.
+3. In `/admin`, select the user and set the duration (1–3650 days; default 30).
+4. Choose **Verify payment and activate**. Access becomes active immediately and expires automatically.
+5. Use **Deactivate membership** to revoke access immediately.
 
-من `/admin` اختر المستخدم وأدخل عنوان API وModel ID ومفتاح API. يمكن إعداد خوادم MCP المحلية أو البعيدة بصيغة JSON. تُشفّر المفاتيح والإعدادات الحساسة قبل التخزين ولا تُعاد إلى المتصفح بعد الحفظ. لا تستخدم إعدادات MCP من مصدر غير موثوق.
+No Stripe secrets or Stripe webhook are needed for this manual mode.
 
-## تنبيهات أمنية
+## 5. Deployment smoke tests
 
-- إعداد حساب الإدارة يتم من `ADMIN_EMAIL` و`ADMIN_PASSWORD` عند بدء الخدمة.
-- لا ترفع ملفات `.env` الحقيقية إلى GitHub.
-- الخدمة تستخدم SQLite على قرص دائم وتفترض نسخة Render واحدة. لا تضاعف عدد النسخ دون نقل البيانات إلى قاعدة مُدارة وتصميم منفصل للعمّال.
-- الفصل بهوية Unix ومساحة عمل خاصة لا يُعد عزلاً كاملاً لتنفيذ الشيفرة. قبل فتح التنفيذ الحر للجمهور، أضف حاويات أو آلات افتراضية مستقلة مع حدود للموارد والشبكة ومراقبة الاستخدام.
-- أنيميشن المكعب مؤشّر بصري فقط ولا يعرض التفكير الداخلي الحقيقي.
+1. Visit `/healthz` and confirm `ok: true`.
+2. Register a normal user and confirm workspace access is blocked before membership approval.
+3. Configure a valid API connection, then manually activate the test account.
+4. Send a short coding task asking OpenCode to create a file and run a harmless test. Check the response, provider-reported token data, and Render logs.
+5. Test web search separately. Exa access is enabled for the worker; actual search capability can still depend on current service availability.
+6. Revoke membership and confirm that the workspace is inaccessible.
+
+## Security notes
+
+- Keep `APP_ENCRYPTION_KEY` stable and private.
+- The app is designed for one Render instance with a persistent disk and SQLite.
+- Private workspaces and Unix identities are not full containers. Add per-task isolation and resource/network limits before opening arbitrary command execution to the public.
+- Timing is measured by the application. Token usage is provider-reported; if the provider omits usage, the UI says it is unavailable rather than showing a fabricated number.
