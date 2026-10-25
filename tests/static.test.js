@@ -23,9 +23,11 @@ test('the working animation is present and embedded in the paid workspace', () =
 
 test('OpenCode built-in tools, web search, and code intelligence use the supported config shape', () => {
   const server = read('server.js');
-  assert.match(server, /permission: \{ '\*': 'allow' \}/);
-  assert.match(server, /websearch: \{ provider: 'exa' \}/);
-  assert.match(server, /lsp: true/);
+  assert.match(server, /permission: \{ '\*': 'allow', external_directory: 'deny' \}/);
+  assert.match(server, /OPENCODE_ENABLE_EXA: '1'/);
+  assert.match(server, /OPENCODE_EXPERIMENTAL_LSP_TOOL: 'true'/);
+  assert.match(server, /mcp: getMcpConfigForUser\(user\)/);
+  assert.match(server, /mode: 'subagent'/);
   assert.match(server, /OPENCODE_ENABLE_EXA: '1'/);
   assert.match(server, /OPENCODE_EXPERIMENTAL_LSP_TOOL: 'true'/);
 });
@@ -95,9 +97,74 @@ test('admin panel assigns per-user API credentials without returning stored secr
   assert.match(server, /function requireAdmin/);
   assert.match(server, /bootstrapAdminAccount\(\)/);
   assert.match(html, /id="apiKey"/);
+  assert.match(html, /id="mcpConfig"/);
+  assert.match(html, /id="clearMcp"/);
+  assert.match(server, /ai_mcp_config_encrypted/);
+  assert.match(server, /require\('\.\/mcp-config'\)/);
+  assert.match(read('mcp-config.js'), /function validateMcpConfig/);
+  assert.match(js, /clearMcpConfig: true/);
   assert.match(js, /مفتاح محفوظ/);
   assert.match(render, /key: ADMIN_EMAIL/);
   assert.match(render, /key: ADMIN_PASSWORD/);
   assert.match(render, /key: APP_ENCRYPTION_KEY/);
   assert.doesNotMatch(server, /apiKey:\s*user\.ai_api_key_encrypted/);
+});
+
+
+test('OpenCode native tools remain enabled while external directory reads stay within workspace', () => {
+  const server = read('server.js');
+  assert.match(server, /permission: \{ '\*': 'allow', external_directory: 'deny' \}/);
+  assert.match(server, /OPENCODE_EXPERIMENTAL: 'true'/);
+  assert.match(server, /mcp: getMcpConfigForUser\(user\)/);
+  assert.match(server, /ai_mcp_config_encrypted/);
+});
+
+test('Bundled agent skills follow the OpenCode SKILL.md layout', () => {
+  const skills = ['code-review', 'web-research', 'test-debugging'];
+  for (const name of skills) {
+    const content = read(`opencode/skills/${name}/SKILL.md`);
+    assert.match(content, new RegExp(`name: ${name}`));
+    assert.match(content, /description:/);
+  }
+  assert.match(read('server.js'), /seedUserSkills/);
+});
+
+
+test('chat displays safe tool-name activity summaries returned by OpenCode', () => {
+  const client = read('public/app.js');
+  const server = read('server.js');
+  assert.match(client, /function addToolActivity/);
+  assert.match(client, /addToolActivity\(data\.toolsUsed\)/);
+  assert.match(server, /const toolsUsed = \[\.\.\.new Set/);
+});
+
+
+test('MCP config validator accepts secure remote and local definitions', () => {
+  const { validateMcpConfig } = require('../mcp-config');
+  const remote = validateMcpConfig(JSON.stringify({ docs: {
+    type: 'remote', url: 'https://mcp.example.com/mcp', enabled: true,
+    headers: { Authorization: 'Bearer placeholder' }, oauth: false, timeout: 12000
+  } }));
+  assert.equal(remote.docs.type, 'remote');
+  assert.equal(remote.docs.oauth, false);
+  const local = validateMcpConfig({ github: {
+    type: 'local', command: ['npx', '-y', '@example/mcp'], enabled: true,
+    environment: { API_TOKEN: 'placeholder' }
+  } });
+  assert.equal(local.github.type, 'local');
+  assert.equal(local.github.command[0], 'npx');
+});
+
+test('MCP config validator rejects malformed, insecure production, and oversized settings', () => {
+  const { validateMcpConfig } = require('../mcp-config');
+  assert.throws(() => validateMcpConfig('{bad'), /MCP_CONFIG_INVALID_JSON/);
+  assert.throws(() => validateMcpConfig({ local: { type: 'local', command: [] } }), /MCP_CONFIG_INVALID_COMMAND/);
+  const prior = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    assert.throws(() => validateMcpConfig({ remote: { type: 'remote', url: 'http://mcp.example.com' } }), /MCP_CONFIG_INVALID_URL/);
+  } finally {
+    if (prior === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prior;
+  }
+  assert.throws(() => validateMcpConfig(' '.repeat(24001)), /MCP_CONFIG_TOO_LARGE/);
 });

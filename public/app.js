@@ -100,6 +100,15 @@ function addMessage(role, content) {
   renderMarkdownSafe(body, content);
   wrap.append(head, body); $('chatMessages').append(wrap); scrollChatToBottom();
 }
+
+function addToolActivity(tools) {
+  const names = [...new Set((Array.isArray(tools) ? tools : []).filter(name => typeof name === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(name)))];
+  if (!names.length) return;
+  const row = document.createElement('div'); row.className = 'tool-activity';
+  const icon = document.createElement('span'); icon.className = 'tool-activity-dot'; icon.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span'); label.textContent = `الأدوات المستخدمة: ${names.join(' · ')}`;
+  row.append(icon, label); $('chatMessages').append(row); scrollChatToBottom();
+}
 function setView(view) {
   $('hero').classList.toggle('hidden', view !== 'landing');
   $('authSection').classList.toggle('hidden', view !== 'auth');
@@ -241,6 +250,7 @@ $('chatForm').addEventListener('submit', async event => {
   try {
     const data = await request('/api/chat', { method: 'POST', body: JSON.stringify({ message: text }) });
     addMessage('assistant', data.answer);
+    addToolActivity(data.toolsUsed);
   } catch (err) {
     showNotice('chatError', err.message, 'error');
     addMessage('assistant', 'لم أتمكن من إكمال هذه المحاولة. يمكنك إعادة الطلب بعد مراجعة الرسالة أعلاه.');

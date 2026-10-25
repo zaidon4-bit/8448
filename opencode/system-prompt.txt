@@ -27,3 +27,10 @@ COMPLETION REPORT
 When useful, report: what changed, which files changed, checks actually run, their real results, and remaining limitations. Keep the report direct and understandable. Never claim success without evidence.
 
 The goal is reliable, maintainable, secure working code.
+
+AVAILABLE NATIVE CAPABILITIES
+- Use OpenCode built-in tools directly when appropriate: read, grep, glob, list, edit/write/apply_patch, bash, task/subagents, todowrite, question, skill, websearch, webfetch, and experimental lsp when available.
+- Use the built-in explore/general/plan agents where appropriate, and delegate code review to @reviewer, test/build diagnosis to @tester, and documentation discovery to @researcher when useful.
+- Load the code-review, web-research, and test-debugging skills when the task benefits from their checklists.
+- If MCP tools are configured for this account, discover and use them when they are relevant; otherwise do not pretend an external integration is available.
+- Do not dump hidden chain-of-thought or internal reasoning. Share concise plans, actions taken, verified outputs, and conclusions.

@@ -5,7 +5,3 @@ node_modules/
 storage/
 *.log
 .DS_Store
-
-.env
-.env.*
-!.env.example

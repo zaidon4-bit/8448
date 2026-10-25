@@ -15,6 +15,7 @@ const net = require('node:net');
 const http = require('node:http');
 const https = require('node:https');
 const { spawn, spawnSync } = require('node:child_process');
+const { validateMcpConfig } = require('./mcp-config');
 
 process.umask(0o077);
 const app = express();
@@ -65,6 +66,7 @@ db.exec(`
     ai_base_url TEXT,
     ai_model_id TEXT,
     ai_api_key_encrypted TEXT,
+    ai_mcp_config_encrypted TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS chat_messages (
@@ -87,7 +89,8 @@ for (const [name, definition] of Object.entries({
   is_disabled: 'INTEGER NOT NULL DEFAULT 0',
   ai_base_url: 'TEXT',
   ai_model_id: 'TEXT',
-  ai_api_key_encrypted: 'TEXT'
+  ai_api_key_encrypted: 'TEXT',
+  ai_mcp_config_encrypted: 'TEXT'
 })) {
   if (!userColumns.has(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
 }
@@ -147,6 +150,12 @@ function decryptApiKey(value) {
   const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(parts[1], 'base64url'));
   decipher.setAuthTag(Buffer.from(parts[2], 'base64url'));
   return Buffer.concat([decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()]).toString('utf8');
+}
+
+function getMcpConfigForUser(user) {
+  if (!user || !user.ai_mcp_config_encrypted) return {};
+  const raw = decryptApiKey(user.ai_mcp_config_encrypted);
+  return validateMcpConfig(raw);
 }
 function getAIConfigForUser(user) {
   if (user && user.ai_api_key_encrypted && user.ai_base_url && user.ai_model_id) {
@@ -352,10 +361,49 @@ function seedWorkspaceFile(destination, content) {
     fd = fs.openSync(destination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600);
     fs.writeFileSync(fd, content, 'utf8');
     fs.closeSync(fd);
+    return true;
   } catch (err) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
-    if (err && err.code === 'EEXIST') return;
+    if (err && err.code === 'EEXIST') return false;
     throw err;
+  }
+}
+
+function seedUserSkills(homeDir, uid, gid) {
+  const bundledRoot = path.join(__dirname, 'opencode', 'skills');
+  if (!fs.existsSync(bundledRoot)) return;
+  // Walk each directory without following symlinks because the worker owns its HOME.
+  let current = homeDir;
+  for (const segment of ['.config', 'opencode', 'skills']) {
+    current = path.join(current, segment);
+    try {
+      const st = fs.lstatSync(current);
+      if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('Unsafe skill directory path');
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') throw err;
+      fs.mkdirSync(current, { mode: 0o700 });
+    }
+    fs.chownSync(current, uid, gid);
+    fs.chmodSync(current, 0o700);
+  }
+  for (const skillName of fs.readdirSync(bundledRoot)) {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillName)) continue;
+    const sourceDir = path.join(bundledRoot, skillName);
+    const sourceFile = path.join(sourceDir, 'SKILL.md');
+    if (!fs.existsSync(sourceFile) || !fs.statSync(sourceDir).isDirectory()) continue;
+    const destDir = path.join(current, skillName);
+    try {
+      const st = fs.lstatSync(destDir);
+      if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('Unsafe skill directory path');
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') throw err;
+      fs.mkdirSync(destDir, { mode: 0o700 });
+    }
+    fs.chownSync(destDir, uid, gid); fs.chmodSync(destDir, 0o700);
+    const destFile = path.join(destDir, 'SKILL.md');
+    const created = seedWorkspaceFile(destFile, fs.readFileSync(sourceFile, 'utf8'));
+    // Only chown a file we just created; never follow or modify a user-owned existing path.
+    if (created) { fs.chownSync(destFile, uid, gid); fs.chmodSync(destFile, 0o600); }
   }
 }
 function writeUserPromptFiles(userId, uid, gid, workspace, isNewWorkspace) {
@@ -428,6 +476,7 @@ async function ensureOpenCodeForUser(user) {
   fs.mkdirSync(workspace, { recursive: true, mode: 0o700 });
   fs.mkdirSync(homeDir, { recursive: true, mode: 0o700 });
   const identity = ensureUnixIdentity(user.id, uid, homeDir);
+  seedUserSkills(homeDir, identity.uid, identity.gid);
   if (isNewWorkspace) {
     writeUserPromptFiles(user.id, identity.uid, identity.gid, workspace, true);
   } else {
@@ -455,6 +504,7 @@ async function ensureOpenCodeForUser(user) {
     NODE_ENV: 'production',
     OPENCODE_ENABLE_EXA: '1',
     OPENCODE_EXPERIMENTAL_LSP_TOOL: 'true',
+    OPENCODE_EXPERIMENTAL: 'true',
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
       $schema: 'https://opencode.ai/config.json',
       provider: { managed: {
@@ -465,10 +515,16 @@ async function ensureOpenCodeForUser(user) {
       } },
       model: 'managed/code-assistant',
       default_agent: 'build',
-      permission: { '*': 'allow' },
-      lsp: true,
-      websearch: { provider: 'exa' },
-      agent: { build: { mode: 'primary', prompt: `{file:${path.join(__dirname, 'opencode', 'system-prompt.txt')}}` } }
+      // Keep the complete built-in toolset available. Prevent cross-workspace file tools;
+      // each subscriber gets a private Unix identity and workspace.
+      permission: { '*': 'allow', external_directory: 'deny' },
+      mcp: getMcpConfigForUser(user),
+      agent: {
+        build: { mode: 'primary', prompt: `{file:${path.join(__dirname, 'opencode', 'system-prompt.txt')}}` },
+        reviewer: { mode: 'subagent', description: 'Review code for correctness, security, regressions, and maintainability.', prompt: 'Review the current changes critically. Do not modify files. Identify concrete bugs, security issues, missing tests, and regressions. Return findings first, ordered by severity, and cite file paths and lines where possible.', permission: { '*': 'allow', edit: 'deny', bash: 'allow', external_directory: 'deny' } },
+        tester: { mode: 'subagent', description: 'Run and diagnose relevant tests and builds.', prompt: 'Inspect project scripts and test setup, then run relevant checks. You may make minimal test-focused fixes only when explicitly asked by the parent task. Report exact commands and actual results; never invent success.', permission: { '*': 'allow', external_directory: 'deny' } },
+        researcher: { mode: 'subagent', description: 'Research current technical documentation and compare solutions.', prompt: 'Use websearch to discover current primary documentation and webfetch to read relevant official pages. Cite source URLs and distinguish verified facts from inference. Do not modify files.', permission: { '*': 'allow', edit: 'deny', bash: 'deny', external_directory: 'deny' } }
+      }
     }),
     OPENCODE_SERVER_PASSWORD: password,
     OPENCODE_SERVER_USERNAME: 'internal',
@@ -658,7 +714,7 @@ app.get('/api/me', (req, res) => {
 app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
 app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
   const users = db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status,
-    subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, created_at
+    subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, ai_mcp_config_encrypted, created_at
     FROM users ORDER BY id DESC LIMIT 500`).all().map(user => ({
       id: user.id,
       email: user.email,
@@ -667,6 +723,7 @@ app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
       subscriptionStatus: user.subscription_status,
       subscriptionCurrentPeriodEnd: user.subscription_current_period_end,
       apiConfigured: !!(user.ai_base_url && user.ai_model_id && user.ai_api_key_encrypted),
+      mcpConfigured: !!user.ai_mcp_config_encrypted,
       apiBaseUrl: user.ai_base_url || '',
       modelId: user.ai_model_id || '',
       createdAt: user.created_at
@@ -685,6 +742,33 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
   let baseUrl = user.ai_base_url || '';
   let modelId = user.ai_model_id || '';
   let encryptedKey = user.ai_api_key_encrypted || null;
+  let encryptedMcpConfig = user.ai_mcp_config_encrypted || null;
+  if (body.clearMcpConfig === true) encryptedMcpConfig = null;
+  else if (body.mcpConfig !== undefined && String(body.mcpConfig || '').trim()) {
+    try {
+      const mcp = validateMcpConfig(String(body.mcpConfig));
+      encryptedMcpConfig = Object.keys(mcp).length ? encryptApiKey(JSON.stringify(mcp)) : null;
+    } catch (err) {
+      const messages = {
+        MCP_CONFIG_TOO_LARGE: 'إعداد MCP كبير جداً (الحد 24 كيلوبايت).',
+        MCP_CONFIG_INVALID_JSON: 'صيغة JSON الخاصة بـ MCP غير صحيحة.',
+        MCP_CONFIG_INVALID_OBJECT: 'إعداد MCP يجب أن يكون كائناً من نوع JSON.',
+        MCP_CONFIG_TOO_MANY_SERVERS: 'الحد الأقصى 12 خادم MCP لكل مستخدم.',
+        MCP_CONFIG_INVALID_NAME: 'اسم خادم MCP غير صالح.',
+        MCP_CONFIG_INVALID_SERVER: 'إعداد أحد خوادم MCP غير صالح.',
+        MCP_CONFIG_UNKNOWN_OPTION: 'يوجد خيار غير مدعوم في إعداد MCP.',
+        MCP_CONFIG_INVALID_TIMEOUT: 'مهلة MCP يجب أن تكون بين 1000 و120000 مللي ثانية.',
+        MCP_CONFIG_INVALID_URL: 'عنوان MCP غير صالح؛ استخدم HTTPS في الإنتاج.',
+        MCP_CONFIG_INVALID_HEADERS: 'ترويسات MCP غير صالحة.',
+        MCP_CONFIG_INVALID_OAUTH: 'إعداد OAuth الخاص بـ MCP غير صالح.',
+        MCP_CONFIG_INVALID_COMMAND: 'أمر خادم MCP المحلي غير صالح.',
+        MCP_CONFIG_INVALID_CWD: 'مجلد عمل MCP يجب أن يكون مساراً نسبياً داخل المشروع.',
+        MCP_CONFIG_INVALID_ENV: 'متغيرات بيئة MCP غير صالحة.',
+        MCP_CONFIG_INVALID_TYPE: 'نوع خادم MCP يجب أن يكون local أو remote.'
+      };
+      return res.status(400).json({ error: messages[err.message] || 'تعذّر التحقق من إعداد MCP.' });
+    }
+  }
   if (body.clearApiConfig === true) {
     baseUrl = ''; modelId = ''; encryptedKey = null;
   } else {
@@ -712,13 +796,14 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
     }
     if (encryptedKey && (!baseUrl || !modelId)) return res.status(400).json({ error: 'لا يمكن ترك عنوان API أو معرّف النموذج فارغاً لمفتاح محفوظ.' });
   }
-  db.prepare('UPDATE users SET is_disabled = ?, ai_base_url = ?, ai_model_id = ?, ai_api_key_encrypted = ? WHERE id = ?')
-    .run(isDisabled, baseUrl || null, modelId || null, encryptedKey, userId);
+  db.prepare('UPDATE users SET is_disabled = ?, ai_base_url = ?, ai_model_id = ?, ai_api_key_encrypted = ?, ai_mcp_config_encrypted = ? WHERE id = ?')
+    .run(isDisabled, baseUrl || null, modelId || null, encryptedKey, encryptedMcpConfig, userId);
   stopInstance(userId);
   const updated = selectUserById.get(userId);
   res.set('Cache-Control', 'no-store');
   res.json({ user: { id: updated.id, email: updated.email, isDisabled: updated.is_disabled === 1,
     apiConfigured: !!(updated.ai_base_url && updated.ai_model_id && updated.ai_api_key_encrypted),
+    mcpConfigured: !!updated.ai_mcp_config_encrypted,
     apiBaseUrl: updated.ai_base_url || '', modelId: updated.ai_model_id || '' } });
 });
 app.post('/api/auth/register', authLimiter, async (req, res) => {
@@ -825,9 +910,10 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
     const parts = Array.isArray(payload.parts) ? payload.parts : [];
     const answer = parts.filter(part => part && part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n\n').trim();
     const finalText = answer || 'انتهى الطلب، لكن لم يصل نصّ قابل للعرض. افحص الملفات أو أعد صياغة المهمة.';
+    const toolsUsed = [...new Set(parts.filter(part => part && part.type === 'tool' && typeof part.tool === 'string').map(part => part.tool))].slice(0, 40);
     insertMessage.run(userNow.id, 'user', prompt);
     insertMessage.run(userNow.id, 'assistant', finalText);
-    res.json({ answer: finalText, sessionId: userNow.opencode_session_id });
+    res.json({ answer: finalText, toolsUsed, sessionId: userNow.opencode_session_id });
   } catch (err) {
     console.error(`Coding request failed for user ${req.authUser.id}:`, err && err.message ? err.message : 'unknown error');
     res.status(502).json({ error: 'تعذّر إكمال المهمة حالياً. قد تكون الخدمة مشغولة؛ جرّب مجدداً بعد قليل.' });

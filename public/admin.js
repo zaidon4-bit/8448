@@ -48,9 +48,10 @@ function selectUser(id) {
   $('apiBaseUrl').value = user.apiBaseUrl || '';
   $('modelId').value = user.modelId || '';
   $('apiKey').value = '';
+  $('mcpConfig').value = '';
   $('apiKey').placeholder = user.apiConfigured ? 'مفتاح محفوظ؛ أدخل مفتاحاً جديداً للاستبدال' : 'أدخل مفتاح API للمستخدم';
   $('isDisabled').checked = user.isDisabled;
-  $('apiStatus').textContent = user.apiConfigured ? 'اتصال مخصص محفوظ' : 'لا يوجد اتصال مخصص';
+  $('apiStatus').textContent = `${user.apiConfigured ? 'اتصال مخصص محفوظ' : 'لا يوجد اتصال مخصص'} · ${user.mcpConfigured ? 'MCP محفوظ' : 'لا يوجد MCP'}`;
   $('apiStatus').style.color = user.apiConfigured ? '#a7efd4' : '#a9b4cb';
   renderUsers();
 }
@@ -81,6 +82,7 @@ $('userConfigForm').addEventListener('submit', async event => {
     isDisabled: $('isDisabled').checked
   };
   if ($('apiKey').value.trim()) payload.apiKey = $('apiKey').value.trim();
+  if ($('mcpConfig').value.trim()) payload.mcpConfig = $('mcpConfig').value.trim();
   try {
     await api(`/api/admin/users/${selectedId}`, { method: 'PATCH', body: JSON.stringify(payload) });
     $('apiKey').value = '';
@@ -100,3 +102,14 @@ $('clearApi').addEventListener('click', async () => {
   finally { button.disabled = false; }
 });
 loadUsers();
+
+$('clearMcp').addEventListener('click', async () => {
+  if (!selectedId) return notice('اختر مستخدماً أولاً.', true);
+  if (!window.confirm('هل تريد مسح خوادم MCP المحفوظة لهذا المستخدم؟')) return;
+  const button = $('clearMcp'); button.disabled = true;
+  try {
+    await api(`/api/admin/users/${selectedId}`, { method: 'PATCH', body: JSON.stringify({ clearMcpConfig: true, isDisabled: $('isDisabled').checked }) });
+    $('mcpConfig').value = ''; notice('تم مسح إعداد MCP لهذا المستخدم.'); await loadUsers(true);
+  } catch (err) { notice(err.message, true); }
+  finally { button.disabled = false; }
+});

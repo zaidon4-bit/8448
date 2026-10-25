@@ -32,8 +32,10 @@
           <label class="field"><span>معرّف النموذج</span><input id="modelId" type="text" placeholder="model-id" dir="ltr" maxlength="200" autocomplete="off"></label>
           <label class="field"><span>مفتاح API</span><input id="apiKey" type="password" placeholder="أدخل مفتاحاً جديداً لتغييره" dir="ltr" autocomplete="new-password" maxlength="2000"></label>
           <p class="admin-hint">المفتاح المحفوظ لا يمكن عرضه مجدداً. اترك الحقل فارغاً للاحتفاظ بالمفتاح الحالي.</p>
+          <label class="field"><span>إعداد خوادم MCP للمستخدم (JSON اختياري)</span><textarea id="mcpConfig" rows="10" dir="ltr" spellcheck="false" placeholder='{"context7":{"type":"remote","url":"https://your-mcp-server.example/mcp","enabled":true}}'></textarea></label>
+          <p class="admin-hint">خوادم MCP تضيف أدوات خارجية إلى OpenCode. اترك الحقل فارغاً للاحتفاظ بالإعداد المحفوظ؛ الصق JSON جديداً لاستبداله. أي أسرار داخل JSON تُشفّر على الخادم ولا تُعرض بعد الحفظ. لا تضف خادماً إلا إذا كنت تثق بمصدره وصلاحياته.</p>
           <label class="admin-check"><input id="isDisabled" type="checkbox"><span>إيقاف حساب المستخدم ومنعه من استخدام الخدمة</span></label>
-          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">حفظ الإعدادات</button><button id="clearApi" class="button button-quiet" type="button">مسح اتصال API</button></div>
+          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">حفظ الإعدادات</button><button id="clearApi" class="button button-quiet" type="button">مسح اتصال API</button><button id="clearMcp" class="button button-quiet" type="button">مسح إعداد MCP</button></div>
           <p class="admin-hint">تفعيل الاشتراك المدفوع يتم عبر تأكيد الدفع من Stripe؛ لا تفعّله من هذه الصفحة يدوياً.</p>
         </form>
       </section>

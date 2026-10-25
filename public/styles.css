@@ -66,3 +66,8 @@ body.in-workspace .global-notice{display:none!important}
  body.in-workspace .thinking-box iframe{height:65px;width:190px}
 }
 @media(prefers-reduced-motion:reduce){body.in-workspace .thinking-box::before,body.in-workspace .thinking-box::after,body.in-workspace .empty-orbit{animation:none!important}}
+
+
+/* Compact activity summary: expose tool names, never raw tool arguments or secrets. */
+.tool-activity{display:flex;align-items:center;gap:9px;max-width:min(840px,94%);margin:2px auto 16px;padding:8px 12px;border:1px solid rgba(130,150,185,.16);border-radius:12px;color:var(--muted,#9da9bd);font-size:12px;line-height:1.6;background:rgba(18,24,39,.42);direction:rtl}
+.tool-activity-dot{width:7px;height:7px;flex:none;border-radius:50%;background:#dce36c;box-shadow:0 0 9px rgba(220,227,108,.45)}
