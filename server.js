@@ -14,7 +14,11 @@ const net = require('node:net');
 const http = require('node:http');
 const https = require('node:https');
 const { spawn, spawnSync } = require('node:child_process');
-const { applyGenerationControls } = require('./generation-controls');
+const { applyGenerationControls, ALLOWED_REASONING_LEVELS, ALLOWED_OUTPUT_TARGETS, getOpenCodeModelCapabilities, isGemini25ProModel } = require('./generation-controls');
+const { configurePostgresTls } = require('./database-tls');
+
+const CODECRAFT_RELEASE_ID = 'tls-opencode-gemini-20261026-r4';
+console.info(`CODECRAFT_RELEASE_ID=${CODECRAFT_RELEASE_ID}`);
 
 process.umask(0o077);
 const app = express();
@@ -71,22 +75,42 @@ const DB_PATH = path.join(DATA_DIR, 'codecraft.sqlite');
 const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
 let pgPool = null;
 let sqliteDb = null;
+let databaseTlsMode = 'sqlite-local';
+let databaseHost = null;
 let db;
 
 // Supabase PostgreSQL is the primary persistent store when DATABASE_URL is set.
 // SQLite remains as a local-development fallback and as a one-time migration source.
 if (DATABASE_URL) {
+  try { databaseHost = new URL(DATABASE_URL).hostname; } catch { databaseHost = null; }
+  databaseTlsMode = String(process.env.SUPABASE_TLS_MODE || 'verify').trim().toLowerCase();
   const { Pool, types } = require('pg');
   // PostgreSQL int8 columns used by this app stay safely within JavaScript's
   // integer range; parsing them as numbers avoids string/number ID mismatches.
   types.setTypeParser(20, value => Number(value));
-  pgPool = new Pool({
-    connectionString: DATABASE_URL,
+  const postgresTls = configurePostgresTls(DATABASE_URL);
+  databaseTlsMode = postgresTls.mode;
+  databaseHost = new URL(DATABASE_URL).hostname;
+  const poolOptions = {
+    connectionString: postgresTls.connectionString,
     max: Math.max(2, Math.min(10, Number(process.env.DB_POOL_MAX || 5))),
     idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 12_000,
-    ssl: { rejectUnauthorized: true }
+    connectionTimeoutMillis: 12_000
+  };
+  // In compatibility mode the helper explicitly sets ssl.rejectUnauthorized=false.
+  // TLS encryption remains enabled, but server identity is not verified; use only
+  // as a temporary diagnostic on Supabase. Verified CA mode is the default.
+  if (postgresTls.ssl) poolOptions.ssl = postgresTls.ssl;
+  pgPool = new Pool(poolOptions);
+  pgPool.on('error', err => {
+    console.error('PostgreSQL pool error:', JSON.stringify({
+      code: err && err.code || null,
+      message: err && err.message || 'unknown database connection error',
+      tlsMode: databaseTlsMode,
+      host: databaseHost
+    }));
   });
+  console.info(`PostgreSQL TLS mode: ${postgresTls.mode}; host: ${databaseHost}`);
   function pgSql(sql) {
     let index = 0;
     return String(sql).replace(/\?/g, () => `$${++index}`);
@@ -123,6 +147,16 @@ if (DATABASE_URL) {
     console.warn('DATABASE_URL is not configured; using the local SQLite database. Configure Supabase on Render for remote persistence.');
   }
 }
+
+console.info('CodeCraft runtime identity:', JSON.stringify({
+  release: process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'unknown',
+  renderServiceId: process.env.RENDER_SERVICE_ID || null,
+  nodeVersion: process.version,
+  databaseConfigured: Boolean(DATABASE_URL),
+  databaseHost,
+  databaseTlsMode,
+  databaseTlsModeSetting: DATABASE_URL ? String(process.env.SUPABASE_TLS_MODE || 'verify').trim().toLowerCase() : 'not-applicable'
+}));
 
 const selectUserById = { get: (...params) => db.prepare('SELECT * FROM users WHERE id = ?').get(...params) };
 const selectUserByEmail = { get: (...params) => db.prepare('SELECT * FROM users WHERE email = ?').get(...params) };
@@ -322,6 +356,9 @@ const proxyTokens = new Map();
 const proxyRate = new Map();
 const instances = new Map();
 const instanceStartPromises = new Map();
+let lastGenerationDiagnostic = null;
+let lastOpenCodeTaskDiagnostic = null;
+let lastOpenCodeWorkerConfigDiagnostic = null;
 let shuttingDown = false;
 
 function encryptionKey() {
@@ -469,6 +506,9 @@ const proxyServer = http.createServer((req, res) => {
     let target;
     try { target = getProviderTarget(req.url, aiConfig); }
     catch { res.writeHead(503, { 'content-type': 'application/json' }); return res.end('{"error":"service_unavailable"}'); }
+    if (generationDiagnosticId && lastGenerationDiagnostic && lastGenerationDiagnostic.id === generationDiagnosticId) {
+      lastGenerationDiagnostic.upstreamHost = target.host;
+    }
     const transport = target.protocol === 'https:' ? https : http;
     const chunks = [];
     let received = 0;
@@ -479,6 +519,7 @@ const proxyServer = http.createServer((req, res) => {
     });
     req.on('end', async () => {
       let body = Buffer.concat(chunks);
+      let generationDiagnosticId = null;
       if (requestPath === '/v1/chat/completions') {
         try {
           const parsed = JSON.parse(body.toString('utf8'));
@@ -487,16 +528,28 @@ const proxyServer = http.createServer((req, res) => {
           body = Buffer.from(JSON.stringify(transformed.body));
           // Operational proof without logging prompts or credentials. This makes
           // it possible to diagnose whether the stored settings reached the gateway.
-          console.info('Generation controls applied:', JSON.stringify({
+          generationDiagnosticId = crypto.randomUUID();
+          lastGenerationDiagnostic = {
+            id: generationDiagnosticId,
+            at: new Date().toISOString(),
             userId,
             modelFamily: transformed.diagnostics.modelFamily,
-            thinkingMode: transformed.diagnostics.thinkingMode,
+            modelId: transformed.diagnostics.modelId,
+            thinkingEnabled: transformed.diagnostics.thinkingEnabled,
+            reasoningLevel: transformed.diagnostics.reasoningLevel,
             thinkingBudget: transformed.diagnostics.thinkingBudget,
+            reasoningParameter: transformed.diagnostics.reasoningParameter,
             outputTarget: transformed.diagnostics.outputTarget,
             maxAllowed: transformed.diagnostics.maxAllowed,
+            toolDefinitions: transformed.diagnostics.toolDefinitions,
+            toolNames: transformed.diagnostics.toolNames,
+            toolChoice: transformed.diagnostics.toolChoice,
+            upstreamStatusCode: null,
+            upstreamSucceeded: null,
             systemPromptIncluded: transformed.diagnostics.systemPromptIncluded,
             systemPromptInjected: transformed.diagnostics.systemPromptInjected
-          }));
+          };
+          console.info('Generation controls applied:', JSON.stringify(lastGenerationDiagnostic));
         } catch (err) {
           console.warn('Could not prepare OpenAI-compatible request:', String(err && err.message || err));
           res.writeHead(400, { 'content-type': 'application/json' });
@@ -515,13 +568,45 @@ const proxyServer = http.createServer((req, res) => {
       headers['accept-encoding'] = 'identity';
       if (body.length) headers['content-length'] = String(body.length);
       const upstreamReq = transport.request(target, { method: req.method, headers, timeout: 300_000 }, upstreamRes => {
+        if (generationDiagnosticId && lastGenerationDiagnostic && lastGenerationDiagnostic.id === generationDiagnosticId) {
+          lastGenerationDiagnostic.upstreamStatusCode = upstreamRes.statusCode || 500;
+          lastGenerationDiagnostic.upstreamSucceeded = (upstreamRes.statusCode || 500) < 400;
+          lastGenerationDiagnostic.upstreamRespondedAt = new Date().toISOString();
+        }
         if ((upstreamRes.statusCode || 500) >= 400) {
-          upstreamRes.resume();
-          res.writeHead(upstreamRes.statusCode || 502, {
-            'content-type': 'application/json',
-            ...(upstreamRes.headers['retry-after'] ? { 'retry-after': upstreamRes.headers['retry-after'] } : {})
+          const errorChunks = [];
+          let errorBytes = 0;
+          upstreamRes.on('data', chunk => {
+            if (errorBytes >= 4096) return;
+            const limited = chunk.subarray(0, 4096 - errorBytes);
+            errorChunks.push(limited);
+            errorBytes += limited.length;
           });
-          return res.end(JSON.stringify({ error: { message: 'The coding service could not complete this request.', type: 'service_error' } }));
+          upstreamRes.on('end', () => {
+            let providerErrorCode = null;
+            let providerErrorMessage = 'Provider returned an HTTP error.';
+            try {
+              const upstreamBody = JSON.parse(Buffer.concat(errorChunks).toString('utf8'));
+              const detail = upstreamBody && upstreamBody.error;
+              providerErrorCode = detail && typeof detail.code === 'string' ? detail.code.slice(0, 100) : null;
+              if (detail && typeof detail.message === 'string') providerErrorMessage = detail.message;
+              else if (typeof detail === 'string') providerErrorMessage = detail;
+            } catch {}
+            providerErrorMessage = String(providerErrorMessage)
+              .replace(/Bearer\s+[^\s,;]+/ig, 'Bearer [redacted]')
+              .replace(/(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,})/g, '[redacted-key]')
+              .replace(/[\r\n\t]+/g, ' ').slice(0, 400);
+            if (generationDiagnosticId && lastGenerationDiagnostic && lastGenerationDiagnostic.id === generationDiagnosticId) {
+              lastGenerationDiagnostic.upstreamErrorCode = providerErrorCode;
+              lastGenerationDiagnostic.upstreamErrorMessage = providerErrorMessage;
+            }
+            res.writeHead(upstreamRes.statusCode || 502, {
+              'content-type': 'application/json',
+              ...(upstreamRes.headers['retry-after'] ? { 'retry-after': upstreamRes.headers['retry-after'] } : {})
+            });
+            res.end(JSON.stringify({ error: { message: 'The coding service could not complete this request.', type: 'service_error' } }));
+          });
+          return;
         }
         res.writeHead(upstreamRes.statusCode || 502, {
           'content-type': upstreamRes.headers['content-type'] || 'application/json',
@@ -532,7 +617,10 @@ const proxyServer = http.createServer((req, res) => {
         upstreamRes.pipe(res);
       });
       upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('upstream timeout')));
-      upstreamReq.on('error', () => {
+      upstreamReq.on('error', err => {
+        if (generationDiagnosticId && lastGenerationDiagnostic && lastGenerationDiagnostic.id === generationDiagnosticId) {
+          lastGenerationDiagnostic.upstreamTransportError = { code: err && err.code || null, message: String(err && err.message || 'upstream transport error').slice(0, 240) };
+        }
         if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
         if (!res.writableEnded) res.end('{"error":"provider_unavailable"}');
       });
@@ -733,6 +821,27 @@ async function startOpenCodeForUser(user) {
   fs.mkdirSync(tempHome, { recursive: true, mode: 0o700 });
   fs.chownSync(tempHome, identity.uid, identity.gid);
   fs.chmodSync(tempHome, 0o700);
+  const runtimeSystemPrompt = String(fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8')).trim();
+  const workerAIConfig = getAIConfigForUser(user);
+  const workerModelId = workerAIConfig.modelId;
+  const workerModelIsGemini25Pro = isGemini25ProModel(workerModelId);
+  const workerModelCapabilities = getOpenCodeModelCapabilities(workerModelId);
+  // The gateway alias hides the upstream model ID from OpenCode's model catalog.
+  // Explicit capability metadata is required so OpenCode config migration does not
+  // silently discard tool-calling/reasoning support for this custom provider.
+  const modelDefinition = { name: 'Code Assistant', ...workerModelCapabilities };
+  lastOpenCodeWorkerConfigDiagnostic = {
+    at: new Date().toISOString(),
+    userId: user.id,
+    modelFamily: workerModelIsGemini25Pro ? 'gemini-2.5-pro' : 'other-openai-compatible',
+    modelId: String(workerModelId).slice(0, 120),
+    toolCallCapability: workerModelCapabilities.tool_call,
+    reasoningCapability: workerModelCapabilities.reasoning,
+    contextLimit: workerModelCapabilities.limit.context,
+    outputLimit: workerModelCapabilities.limit.output,
+    configFormat: 'OpenCode-v1-pinned-1.19.4-legacy-provider'
+  };
+  console.info('OpenCode worker model capabilities:', JSON.stringify(lastOpenCodeWorkerConfigDiagnostic));
   const childEnv = {
     PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     HOME: homeDir,
@@ -751,16 +860,20 @@ async function startOpenCodeForUser(user) {
       provider: { managed: {
         npm: '@ai-sdk/openai-compatible',
         name: 'Code Assistant',
-        options: { baseURL: `http://${AI_PROXY_HOST}:${AI_PROXY_PORT}/v1`, apiKey: '{env:AI_PROXY_TOKEN}' },
-        models: { 'code-assistant': { name: 'Code Assistant' } }
+        // OPENCODE_CONFIG_CONTENT is inline JSON; do not depend on {env:...} token
+        // substitution here. This is a per-worker proxy token, never the upstream key.
+        options: { baseURL: `http://${AI_PROXY_HOST}:${AI_PROXY_PORT}/v1`, apiKey: proxyToken },
+        models: { 'code-assistant': modelDefinition }
       } },
       model: 'managed/code-assistant',
       default_agent: 'build',
+      websearch: { provider: 'exa' },
       // Keep the complete built-in toolset available. Prevent cross-workspace file tools;
       // each subscriber gets a private Unix identity and workspace.
       permission: { '*': 'allow', external_directory: 'deny' },
       agent: {
-        build: { mode: 'primary', prompt: `{file:${SYSTEM_PROMPT_PATH}}` },
+        // Pass the resolved prompt content directly; inline config does not reliably expand {file:...}.
+        build: { mode: 'primary', prompt: runtimeSystemPrompt },
         reviewer: { mode: 'subagent', description: 'Review code for correctness, security, regressions, and maintainability.', prompt: 'Review the current changes critically. Do not modify files. Identify concrete bugs, security issues, missing tests, and regressions. Return findings first, ordered by severity, and cite file paths and lines where possible.', permission: { '*': 'allow', edit: 'deny', bash: 'allow', external_directory: 'deny' } },
         tester: { mode: 'subagent', description: 'Run and diagnose relevant tests and builds.', prompt: 'Inspect project scripts and test setup, then run relevant checks. You may make minimal test-focused fixes only when explicitly asked by the parent task. Report exact commands and actual results; never invent success.', permission: { '*': 'allow', external_directory: 'deny' } },
         researcher: { mode: 'subagent', description: 'Research current technical documentation and compare solutions.', prompt: 'Use websearch to discover current primary documentation and webfetch to read relevant official pages. Cite source URLs and distinguish verified facts from inference. Do not modify files.', permission: { '*': 'allow', edit: 'deny', bash: 'deny', external_directory: 'deny' } }
@@ -779,7 +892,9 @@ async function startOpenCodeForUser(user) {
   });
   let stderrTail = '';
   child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk.toString()).slice(-6000); });
-  child.stdout.on('data', () => {});
+  // OpenCode config-normalization warnings may be written to stdout. Capture both
+  // streams so worker-start failures include useful diagnostics instead of silence.
+  child.stdout.on('data', chunk => { stderrTail = (stderrTail + chunk.toString()).slice(-6000); });
   const instance = { userId: user.id, uid: identity.uid, gid: identity.gid, workspace, homeDir, port, password, proxyToken, child, ready: false, busy: true, lastUsedAt: Date.now(), stderrTail: () => stderrTail };
   instances.set(user.id, instance);
   child.on('exit', (code, signal) => {
@@ -953,6 +1068,38 @@ app.patch('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => 
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, promptUpdated: systemPrompt !== null && systemPrompt !== previousPrompt });
 });
+app.get('/api/admin/diagnostics', requireAuth, requireAdmin, async (req, res) => {
+  const cli = spawnSync('opencode', ['--version'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+  const skillsRoot = path.join(__dirname, 'opencode', 'skills');
+  const bundledSkills = fs.existsSync(skillsRoot) ? fs.readdirSync(skillsRoot).filter(name => {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) return false;
+    const file = path.join(skillsRoot, name, 'SKILL.md');
+    try { return fs.statSync(file).isFile(); } catch { return false; }
+  }).sort() : [];
+  const prompt = String((await getAppSetting('system_prompt')) || defaultSystemPrompt).trim();
+  let databaseReachable = false;
+  try { await db.prepare('SELECT 1 AS ok').get(); databaseReachable = true; } catch {}
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    release: process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'unknown',
+    database: db.isPostgres ? 'supabase' : 'sqlite',
+    databaseReachable,
+    databaseTlsMode,
+    databaseHost,
+    opencodeInstalled: cli.status === 0,
+    opencodeVersion: cli.status === 0 ? String(cli.stdout || '').trim().slice(0, 100) : null,
+    bundledSkills,
+    activeWorkers: [...instances.values()].map(instance => ({ userId: instance.userId, ready: instance.ready, busy: instance.busy, running: instance.child.exitCode === null })),
+    lastOpenCodeTaskDiagnostic,
+    lastOpenCodeWorkerConfigDiagnostic,
+    releaseId: CODECRAFT_RELEASE_ID,
+    systemPromptConfigured: Boolean(prompt),
+    systemPromptCharacters: prompt.length,
+    lastGenerationDiagnostic,
+    note: 'toolDefinitions/toolNames show the tool schemas sent to the model gateway; lastOpenCodeTaskDiagnostic.toolsUsed shows tools returned by OpenCode for the latest completed task. A successful upstream HTTP status confirms request acceptance, but cannot prove the provider applied every provider-specific option.'
+  });
+});
+
 app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
   const users = (await db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status, subscription_source,
     subscription_requested_at, subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, created_at
@@ -1104,16 +1251,15 @@ app.post('/api/billing/portal', requireAuth, (req, res) => {
   res.status(410).json({ error: 'Subscription management is handled manually by an administrator.' });
 });
 
-const ALLOWED_THINKING_BUDGETS = [4096, 8192, 16384, 24576, 32768];
-const ALLOWED_OUTPUT_TARGETS = [2000, 5000, 10000, 20000];
 function userPreferencePayload(user) {
+  const requestedLevel = String(user && user.reasoning_level || 'medium').trim().toLowerCase();
   return {
-    thinkingMode: user && user.thinking_mode === 'budget' ? 'budget' : 'auto',
-    thinkingBudget: ALLOWED_THINKING_BUDGETS.includes(Number(user && user.thinking_budget)) ? Number(user.thinking_budget) : 8192,
+    thinkingEnabled: !!(user && user.thinking_mode === 'budget'),
+    reasoningLevel: ALLOWED_REASONING_LEVELS.includes(requestedLevel) ? requestedLevel : 'medium',
     outputTarget: ALLOWED_OUTPUT_TARGETS.includes(Number(user && user.output_target)) ? Number(user.output_target) : 5000,
-    thinkingBudgets: ALLOWED_THINKING_BUDGETS,
+    reasoningLevels: ALLOWED_REASONING_LEVELS,
     outputTargets: ALLOWED_OUTPUT_TARGETS,
-    note: 'Automatic mode lets the model choose its reasoning budget. Custom thinking budgets depend on support from the configured model connection. Answer targets guide the response but cannot guarantee a minimum token count.'
+    note: 'When enabled, the selected reasoning level is sent to the provider request. When disabled, the model uses its default or dynamic reasoning behavior; some models still reason internally. Output targets guide detailed answers but cannot guarantee a minimum token count.'
   };
 }
 app.get('/api/user/preferences', requireAuth, requireSubscription, async (req, res) => {
@@ -1124,20 +1270,23 @@ app.get('/api/user/preferences', requireAuth, requireSubscription, async (req, r
 app.patch('/api/user/preferences', requireAuth, requireSubscription, async (req, res) => {
   const body = req.body || {};
   const user = await selectUserById.get(req.authUser.id);
-  const thinkingMode = body.thinkingMode === undefined
-    ? (user && user.thinking_mode === 'budget' ? 'budget' : 'auto')
-    : String(body.thinkingMode).trim().toLowerCase();
-  const thinkingBudget = body.thinkingBudget === undefined
-    ? (ALLOWED_THINKING_BUDGETS.includes(Number(user && user.thinking_budget)) ? Number(user.thinking_budget) : 8192)
-    : Number(body.thinkingBudget);
+  let thinkingEnabled;
+  if (body.thinkingEnabled === undefined) {
+    // Backward compatibility for an older frontend that saved thinkingMode.
+    thinkingEnabled = body.thinkingMode === undefined ? user && user.thinking_mode === 'budget' : body.thinkingMode === 'budget';
+  } else if (typeof body.thinkingEnabled === 'boolean') thinkingEnabled = body.thinkingEnabled;
+  else return res.status(400).json({ error: 'Thinking toggle must be true or false.' });
+
+  const reasoningLevel = body.reasoningLevel === undefined
+    ? (ALLOWED_REASONING_LEVELS.includes(String(user && user.reasoning_level || '').toLowerCase()) ? String(user.reasoning_level).toLowerCase() : 'medium')
+    : String(body.reasoningLevel).trim().toLowerCase();
   const outputTarget = body.outputTarget === undefined
     ? (ALLOWED_OUTPUT_TARGETS.includes(Number(user && user.output_target)) ? Number(user.output_target) : 5000)
     : Number(body.outputTarget);
-  if (!['auto', 'budget'].includes(thinkingMode)) return res.status(400).json({ error: 'Thinking mode must be auto or budget.' });
-  if (!ALLOWED_THINKING_BUDGETS.includes(thinkingBudget)) return res.status(400).json({ error: 'Choose a supported thinking budget.' });
+  if (!ALLOWED_REASONING_LEVELS.includes(reasoningLevel)) return res.status(400).json({ error: 'Choose Low, Medium, High, or XHigh reasoning.' });
   if (!ALLOWED_OUTPUT_TARGETS.includes(outputTarget)) return res.status(400).json({ error: 'Choose a supported long-answer target.' });
-  await db.prepare('UPDATE users SET thinking_mode = ?, thinking_budget = ?, output_target = ? WHERE id = ?')
-    .run(thinkingMode, thinkingBudget, outputTarget, req.authUser.id);
+  await db.prepare('UPDATE users SET thinking_mode = ?, reasoning_level = ?, output_target = ? WHERE id = ?')
+    .run(thinkingEnabled ? 'budget' : 'auto', reasoningLevel, outputTarget, req.authUser.id);
   const updated = await selectUserById.get(req.authUser.id);
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ...userPreferencePayload(updated) });
@@ -1319,14 +1468,17 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
     const parts = Array.isArray(payload.parts) ? payload.parts : [];
     const answer = parts.filter(part => part && part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n\n').trim();
     const finalText = answer || 'The task finished without a text response. Check the workspace files or try a more specific prompt.';
-    const toolsUsed = [...new Set(parts.filter(part => part && (part.type === 'tool' || part.type === 'tool-invocation') && typeof (part.tool || part.name) === 'string').map(part => part.tool || part.name))].slice(0, 40);
+    const toolsUsed = [...new Set(parts.filter(part => part && (part.type === 'tool' || part.type === 'tool-invocation') && typeof (part.tool || part.name) === 'string').map(part => part.tool || part.name))].filter(name => /^[A-Za-z0-9_.:-]{1,80}$/.test(name)).slice(0, 40);
     const durationMs = Date.now() - requestStartedAt;
+    lastOpenCodeTaskDiagnostic = { at: new Date().toISOString(), userId: userNow.id, outcome: 'success', durationMs, toolCount: toolsUsed.length, toolsUsed };
+    console.info('OpenCode task completed:', JSON.stringify({ userId: userNow.id, durationMs, toolCount: toolsUsed.length, toolsUsed }));
     const tokenUsage = summarizeTokenUsage(payload.info || payload.message && payload.message.info || {});
     const metadata = { durationMs, tokenUsage };
     await insertMessage.run(userNow.id, 'user', prompt, null);
     await insertMessage.run(userNow.id, 'assistant', finalText, JSON.stringify(metadata));
     res.json({ answer: finalText, toolsUsed, sessionId: userNow.opencode_session_id, durationMs, tokenUsage });
   } catch (err) {
+    lastOpenCodeTaskDiagnostic = { at: new Date().toISOString(), userId: req.authUser.id, outcome: 'error', errorCode: err && err.code || null };
     console.error(`Coding request failed for user ${req.authUser.id}:`, err && err.message ? err.message : 'unknown error');
     res.status(502).json({ error: 'The task could not be completed. The coding service may be busy; please try again shortly.' });
   } finally {
@@ -1437,7 +1589,31 @@ app.use((err, req, res, next) => {
 let appServer = null;
 let proxyListening = false;
 async function startServer() {
-  await initializeDatabase();
+  try {
+    await initializeDatabase();
+  } catch (err) {
+    // Some PostgreSQL/driver layers wrap the TLS error as `cause` and omit a
+    // top-level code. Match both structured codes and the known TLS message so
+    // Render logs still explain the certificate failure rather than only exit 1.
+    const errorChain = [err, err && err.cause, err && err.originalError].filter(Boolean);
+    const tlsCodes = ['SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_UNTRUSTED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'];
+    const errorCode = String(((errorChain.find(item => tlsCodes.includes(String(item.code || ''))) || errorChain.find(item => item.code)) || {}).code || '');
+    const errorText = errorChain.map(item => String(item.message || '')).join(' | ');
+    const isCertificateError = tlsCodes.includes(errorCode) || /self-signed certificate in certificate chain|unable to verify the first certificate|unable to get local issuer certificate|certificate verify failed/i.test(errorText);
+    if (isCertificateError) {
+      console.error('DATABASE_TLS_DIAGNOSTIC:', JSON.stringify({
+        releaseId: CODECRAFT_RELEASE_ID,
+        code: errorCode || null,
+        host: databaseHost,
+        tlsMode: databaseTlsMode,
+        tlsModeSetting: DATABASE_URL ? String(process.env.SUPABASE_TLS_MODE || 'verify').trim().toLowerCase() : 'not-applicable',
+        caPathConfigured: Boolean(process.env.SUPABASE_CA_CERT_PATH || process.env.PGSSLROOTCERT),
+        inlineCaConfigured: Boolean(String(process.env.SUPABASE_CA_CERT || '').trim()),
+        message: 'The PostgreSQL endpoint certificate chain is not trusted. Verify the root CA belongs to this exact database endpoint, or use SUPABASE_TLS_MODE=compat only temporarily for a Supabase host.'
+      }));
+    }
+    throw err;
+  }
   await bootstrapAdminAccount();
   appServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`CodeCraft web service listening on port ${PORT}`);
@@ -1448,7 +1624,15 @@ async function startServer() {
   proxyServer.listen(AI_PROXY_PORT, AI_PROXY_HOST, () => { proxyListening = true; console.log('Internal AI gateway listening on loopback.'); });
 }
 startServer().catch(err => {
-  console.error('Application startup failed:', err && err.message ? err.message : 'unknown error');
+  console.error('Application startup failed:', JSON.stringify({
+    message: err && err.message ? err.message : 'unknown error',
+    code: err && err.code || null,
+    databaseTlsMode,
+    databaseTlsModeSetting: DATABASE_URL ? String(process.env.SUPABASE_TLS_MODE || 'verify').trim().toLowerCase() : 'not-applicable',
+    databaseHost,
+    release: process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'unknown',
+    stack: err && err.stack ? String(err.stack).split('\n').slice(0, 6).join('\n') : null
+  }));
   process.exit(1);
 });
 

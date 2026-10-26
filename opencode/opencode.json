@@ -10,7 +10,13 @@
       },
       "models": {
         "code-assistant": {
-          "name": "Code Assistant"
+          "name": "Code Assistant",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
         }
       }
     }
@@ -26,5 +32,8 @@
       "mode": "primary",
       "prompt": "{file:/app/opencode/system-prompt.txt}"
     }
+  },
+  "websearch": {
+    "provider": "exa"
   }
 }

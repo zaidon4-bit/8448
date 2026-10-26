@@ -16,6 +16,10 @@ services:
         value: /var/data
       - key: DATABASE_URL
         sync: false
+      - key: SUPABASE_CA_CERT_PATH
+        value: /etc/secrets/supabase-ca.crt
+      - key: SUPABASE_TLS_MODE
+        sync: false
       - key: MAX_ACTIVE_OPENCODE_INSTANCES
         value: "2"
       - key: AI_REQUESTS_PER_MINUTE

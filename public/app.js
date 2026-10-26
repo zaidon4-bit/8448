@@ -5,7 +5,7 @@ let authMode = 'register';
 let currentUser = null;
 let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'Manual activation after administrator review', assistantConfigured: false, paymentsConfigured: false, manualApprovalEnabled: true };
 let busy = false;
-let currentPreferences = { thinkingMode: 'auto', thinkingBudget: 8192, outputTarget: 5000 };
+let currentPreferences = { thinkingEnabled: false, reasoningLevel: 'medium', outputTarget: 5000 };
 let preferencesSavePromise = Promise.resolve();
 let preferencesSaving = false;
 
@@ -196,34 +196,33 @@ function renderUser() {
     setView('membership');
   }
 }
-function normalizeThinkingMode(mode) { return mode === 'budget' ? 'budget' : 'auto'; }
-function normalizeThinkingBudget(value) { const n = Number(value); return [4096, 8192, 16384, 24576, 32768].includes(n) ? n : 8192; }
+function normalizeReasoningLevel(value) { const level = String(value || '').toLowerCase(); return ['low', 'medium', 'high', 'xhigh'].includes(level) ? level : 'medium'; }
 function normalizeOutputTarget(value) { const n = Number(value); return [2000, 5000, 10000, 20000].includes(n) ? n : 5000; }
 function readPreferenceControls() {
   return {
-    thinkingMode: $('thinkingBudgetEnabled').checked ? 'budget' : 'auto',
-    thinkingBudget: normalizeThinkingBudget($('thinkingBudget').value),
+    thinkingEnabled: $('thinkingBudgetEnabled').checked,
+    reasoningLevel: normalizeReasoningLevel($('reasoningLevel').value),
     outputTarget: normalizeOutputTarget($('longAnswerTarget').value)
   };
 }
 function refreshThinkingBudgetEnabled() {
-  $('thinkingBudget').disabled = !$('thinkingBudgetEnabled').checked || preferencesSaving;
   $('thinkingBudgetEnabled').disabled = preferencesSaving;
+  $('reasoningLevel').disabled = preferencesSaving;
   $('longAnswerTarget').disabled = preferencesSaving;
 }
 async function loadUserPreferences() {
   try {
     const data = await request('/api/user/preferences');
     currentPreferences = {
-      thinkingMode: normalizeThinkingMode(data.thinkingMode),
-      thinkingBudget: normalizeThinkingBudget(data.thinkingBudget),
+      thinkingEnabled: Boolean(data.thinkingEnabled),
+      reasoningLevel: normalizeReasoningLevel(data.reasoningLevel),
       outputTarget: normalizeOutputTarget(data.outputTarget)
     };
-    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingMode === 'budget';
-    $('thinkingBudget').value = String(currentPreferences.thinkingBudget);
+    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingEnabled;
+    $('reasoningLevel').value = currentPreferences.reasoningLevel;
     $('longAnswerTarget').value = String(currentPreferences.outputTarget);
     $('preferencesSaveStatus').textContent = 'Saved';
-    $('generationSettingsHelp').textContent = data.note || 'Automatic thinking uses dynamic budget. Custom budget is applied when enabled.';
+    $('generationSettingsHelp').textContent = data.note || 'Enable the selected reasoning level or let the provider choose its dynamic default.';
   } catch (err) {
     $('preferencesSaveStatus').textContent = 'Default';
     $('generationSettingsHelp').textContent = 'Preferences will use the defaults until the account settings can be loaded.';
@@ -240,17 +239,17 @@ async function saveUserPreferences() {
     method: 'PATCH', body: JSON.stringify(desired)
   }).then(data => {
     currentPreferences = {
-      thinkingMode: normalizeThinkingMode(data.thinkingMode),
-      thinkingBudget: normalizeThinkingBudget(data.thinkingBudget),
+      thinkingEnabled: Boolean(data.thinkingEnabled),
+      reasoningLevel: normalizeReasoningLevel(data.reasoningLevel),
       outputTarget: normalizeOutputTarget(data.outputTarget)
     };
-    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingMode === 'budget';
-    $('thinkingBudget').value = String(currentPreferences.thinkingBudget);
+    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingEnabled;
+    $('reasoningLevel').value = currentPreferences.reasoningLevel;
     $('longAnswerTarget').value = String(currentPreferences.outputTarget);
     $('preferencesSaveStatus').textContent = 'Saved';
   }).catch(err => {
-    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingMode === 'budget';
-    $('thinkingBudget').value = String(currentPreferences.thinkingBudget);
+    $('thinkingBudgetEnabled').checked = currentPreferences.thinkingEnabled;
+    $('reasoningLevel').value = currentPreferences.reasoningLevel;
     $('longAnswerTarget').value = String(currentPreferences.outputTarget);
     $('preferencesSaveStatus').textContent = 'Save failed';
     showGlobal(err.message || 'Could not save your preferences.', true);
@@ -260,11 +259,8 @@ async function saveUserPreferences() {
   });
   await preferencesSavePromise;
 }
-$('thinkingBudgetEnabled').addEventListener('change', () => {
-  refreshThinkingBudgetEnabled();
-  saveUserPreferences();
-});
-$('thinkingBudget').addEventListener('change', saveUserPreferences);
+$('thinkingBudgetEnabled').addEventListener('change', saveUserPreferences);
+$('reasoningLevel').addEventListener('change', saveUserPreferences);
 $('longAnswerTarget').addEventListener('change', saveUserPreferences);
 
 const skillsDialog = $('skillsDialog');

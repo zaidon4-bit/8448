@@ -106,13 +106,13 @@
           <input id="projectFiles" type="file" multiple webkitdirectory directory hidden>
           <div class="generation-controls" aria-label="Response settings">
             <div class="generation-control-row">
-              <label class="thinking-budget-toggle" for="thinkingBudgetEnabled"><input id="thinkingBudgetEnabled" type="checkbox"><span>Use custom Thinking Budget</span></label>
-              <select id="thinkingBudget" aria-label="Thinking Budget" disabled>
-                <option value="4096">4,096 thinking tokens</option>
-                <option value="8192" selected>8,192 thinking tokens</option>
-                <option value="16384">16,384 thinking tokens</option>
-                <option value="24576">24,576 thinking tokens</option>
-                <option value="32768">32,768 thinking tokens</option>
+              <label class="thinking-budget-toggle" for="thinkingBudgetEnabled"><input id="thinkingBudgetEnabled" type="checkbox"><span>Enable Thinking Budget</span></label>
+              <label class="reasoning-level-label" for="reasoningLevel">Reasoning level</label>
+              <select id="reasoningLevel" aria-label="Reasoning level">
+                <option value="low">Low</option>
+                <option value="medium" selected>Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">XHigh</option>
               </select>
             </div>
             <div class="generation-control-row">
@@ -125,7 +125,7 @@
               </select>
               <span id="preferencesSaveStatus" role="status">Default</span>
             </div>
-            <p id="generationSettingsHelp" class="generation-settings-help">Automatic thinking is enabled when custom budget is off. Answer target is guidance, not a guaranteed minimum. Settings are saved to your account.</p>
+            <p id="generationSettingsHelp" class="generation-settings-help">When enabled, the selected reasoning level is sent to the model. When off, the model uses its default or dynamic reasoning behavior; some models still reason internally. Answer targets guide detailed responses but cannot guarantee a minimum token count. Settings are saved to your account.</p>
           </div>
           <div class="composer-bottom">
             <div class="composer-left">

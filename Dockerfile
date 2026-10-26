@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git bash python3 python3-pip make g++ gosu passwd \
     && find /usr/bin /usr/sbin -xdev -type f -perm -4000 -exec chmod u-s {} + \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install --global opencode-ai typescript typescript-language-server pyright bash-language-server vscode-langservers-extracted yaml-language-server \
+    && npm install --global opencode-ai@1.19.4 typescript typescript-language-server pyright bash-language-server vscode-langservers-extracted yaml-language-server \
     && opencode --version \
     && opencode serve --help >/dev/null \
     && command -v typescript-language-server >/dev/null \

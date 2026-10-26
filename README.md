@@ -6,7 +6,7 @@ CodeCraft is an English-language web workspace powered by the OpenCode headless 
 
 - `server.js`: Express app, Supabase PostgreSQL persistence when `DATABASE_URL` is configured (SQLite fallback for local development), authentication, admin routes, encrypted per-user API credentials, manual subscription approval, OpenCode process manager, private provider gateway, and upload/export endpoints.
 - `opencode/system-prompt.txt`: built-in default coding-agent instructions. The admin can edit the active System Prompt in `/admin`; the active value is stored on persistent disk.
-- OpenCode native tools are enabled within the user's private workspace. Hosted Exa web search and experimental LSP support are enabled. The Docker image installs language servers for common languages. Reviewer/tester/researcher subagents and bundled skills are included.
+- OpenCode native tools are enabled within the user's private workspace. Hosted Exa web search and experimental LSP support are enabled. The Docker image installs language servers for common languages. Reviewer/tester/researcher subagents and bundled skills are included. No custom MCP server is configured in this release.
 - `Dockerfile` installs OpenCode and validates the executable and server command during image build.
 - English-only responsive UI, user messages aligned right, assistant messages aligned left, transparent compact thinking cube, elapsed time shown in seconds and milliseconds, and provider-reported token usage when available. OpenCode pre-warms when a subscribed user enters the workspace to reduce first-message cold start. The default prompt asks for concise fast answers and avoids tool calls for greetings.
 
@@ -47,12 +47,11 @@ At `/admin`, select a user and enter an HTTPS API base URL, model ID, and API ke
 
 ## Admin assistant controls
 
-The `/admin` page includes a global reasoning-effort selector (`low`, `medium`, `high`) and a System Prompt editor. The default is `low` to reduce latency. For a model ID matching Gemini 2.5 Pro, the gateway passes `reasoning_effort` through the OpenAI-compatible request; upstream provider support/pass-through must be verified with a real request. The model's reasoning cannot be disabled entirely. Saving a changed System Prompt writes it to `/var/data/admin-system-prompt.txt` and restarts existing workers.
-
+The `/admin` page lets the administrator edit the global System Prompt and manage users/API settings. Reasoning controls belong to each subscriber in the chat composer. Saving a changed System Prompt updates persistent app settings and restarts existing workers.
 
 ## Subscriber reasoning controls
 
-Each subscribed user can choose Low, Medium, High, or XHigh from the chat composer. The setting is saved to that user’s account and is applied by the server-side provider proxy. The official Gemini 2.5 Pro OpenAI-compatible mapping documents Low, Medium, and High; XHigh is accepted by the application UI but maps to High for this model/API route, so it is not a distinct fourth Gemini 2.5 Pro effort level. Other providers may support different effort variants.
+Each subscribed user can choose Low, Medium, High, or XHigh and independently enable the Thinking Budget. For Gemini 2.5 Pro, these selections map to thinking budgets of 1,024, 8,192, 24,576, and 32,768 tokens respectively. `XHigh` is this application's label for Gemini 2.5 Pro's maximum manual budget, not a Google-defined reasoning-level name. With the toggle off, the proxy asks for dynamic thinking with `thinking_budget=-1`; Gemini 2.5 Pro still reasons internally. The request's HTTP success and whether ODiRouter actually applies the provider-specific field must be checked against a real upstream request.
 ## Authentication flow
 
 - Account creation does not automatically sign users in. After successful registration, the UI switches to Sign In, keeps the email, clears the password field, and displays a non-error success notice.
@@ -72,4 +71,18 @@ Subscribers can also add up to 20 private OpenCode Skills using a name, descript
 - Existing installations automatically migrate the known previous bundled default prompt to the new default, but any custom administrator prompt is preserved.
 - Per-user Thinking Budget is applied to Gemini 2.5 Pro through `extra_body.google.thinking_config.thinking_budget`. Automatic mode sends `-1`; fixed mode sends the chosen budget.
 - Long Answer Target is applied to the actual output-token ceiling and reinforced in system instructions for substantive tasks. It is not a guaranteed minimum response length, and simple greetings remain short.
-- Render logs show a non-sensitive `Generation controls applied` diagnostic so maintainers can see whether settings were included in the outgoing request.
+- Render logs show a non-sensitive `Generation controls applied` diagnostic. Admin-only `/api/admin/diagnostics` reports the number/names of tool definitions sent, provider HTTP status, and the most recent OpenCode tool names actually executed; it never returns API keys or prompt contents.
+
+
+### Supabase TLS troubleshooting
+See `DEPLOY-AR.md` for the verified root-CA setup required when Render logs `self-signed certificate in certificate chain`. The app never disables Node TLS globally.
+
+
+## Supabase TLS on Render
+
+The app requires the Supabase root CA for verified TLS. Download the root certificate in Supabase Database Settings → SSL Configuration, then add a Render Secret File named `supabase-ca.crt`; the app reads `/etc/secrets/supabase-ca.crt` through `SUPABASE_CA_CERT_PATH`. Do not disable TLS verification globally. See `DEPLOY-AR.md` for the full steps.
+
+
+## Deployment diagnostics
+
+On startup the service prints a `CodeCraft runtime identity` line with the Render commit SHA and database TLS mode (no credentials). If it does not appear after redeploy, check Render's branch and Root Directory. OpenCode's runtime provider config passes the per-worker internal token and the resolved System Prompt directly; it does not rely on inline `{env:...}`/`{file:...}` placeholders.

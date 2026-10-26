@@ -49,6 +49,24 @@ function addAdministratorPrompt(messages, systemPrompt) {
   return true;
 }
 
+function isGemini25ProModel(modelId) {
+  return /(?:^|[^a-z0-9])gemini[\s_\/-]*2\.?5[\s_\/-]*pro(?:$|[^a-z0-9])/i.test(String(modelId || ''));
+}
+
+function getOpenCodeModelCapabilities(modelId) {
+  const isGemini25Pro = isGemini25ProModel(modelId);
+  return {
+    // OpenCode's provider migration needs these flags to preserve model
+    // tool-call and reasoning support when a custom provider is normalized.
+    tool_call: true,
+    reasoning: true,
+    limit: {
+      context: isGemini25Pro ? 1_048_576 : 200_000,
+      output: 65_536
+    }
+  };
+}
+
 function setGoogleThinkingBudget(body, actualThinkingBudget) {
   const extraBody = body.extra_body && typeof body.extra_body === 'object' && !Array.isArray(body.extra_body)
     ? body.extra_body : {};
@@ -71,7 +89,7 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
 
   const modelId = String(aiConfig && aiConfig.modelId || '');
   parsed.model = modelId;
-  const isGemini25Pro = /gemini[\s_\/-]*2\.?5[\s_\/-]*pro/i.test(modelId);
+  const isGemini25Pro = isGemini25ProModel(modelId);
   const thinkingEnabled = !!(user && user.thinking_mode === 'budget');
   const requestedLevel = String(user && user.reasoning_level || 'medium').trim().toLowerCase();
   const reasoningLevel = ALLOWED_REASONING_LEVELS.includes(requestedLevel) ? requestedLevel : 'medium';
@@ -111,7 +129,9 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
     delete parsed.reasoning_effort;
     reasoningParameter = 'extra_body.google.thinking_config.thinking_budget';
     effectiveReasoningEffort = reasoningLevel;
-    maxAllowed = Math.min(GEMINI_25_MAX_OUTPUT_TOKENS, outputTarget + (thinkingEnabled ? thinkingBudget : GEMINI_25_MAX_THINKING_BUDGET));
+    // Gemini dynamic thinking uses a default budget of up to 8,192 tokens;
+    // reserve that amount rather than unnecessarily consuming the full 32,768-token manual budget.
+    maxAllowed = Math.min(GEMINI_25_MAX_OUTPUT_TOKENS, outputTarget + (thinkingEnabled ? thinkingBudget : 8192));
   } else if (thinkingEnabled) {
     // For non-Gemini-2.5 routes, use the OpenAI-compatible reasoning_effort
     // extension only when the selected route is not the Google 2.5 budget API.
@@ -126,10 +146,17 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
   delete parsed.max_completion_tokens;
   parsed.max_tokens = maxAllowed;
 
-  const toolDefinitions = Array.isArray(parsed.tools) ? parsed.tools.length : 0;
+  const toolItems = Array.isArray(parsed.tools) ? parsed.tools : [];
+  const toolDefinitions = toolItems.length;
+  const toolNames = [...new Set(toolItems.map(tool => {
+    if (!tool || typeof tool !== 'object') return '';
+    const name = tool.function && typeof tool.function.name === 'string' ? tool.function.name : tool.name;
+    return typeof name === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(name) ? name : '';
+  }).filter(Boolean))].slice(0, 40);
   return {
     body: parsed,
     diagnostics: {
+      modelId,
       modelFamily: isGemini25Pro ? 'gemini-2.5-pro' : 'other',
       thinkingEnabled,
       reasoningLevel,
@@ -141,6 +168,7 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
       outputTarget,
       maxAllowed,
       toolDefinitions,
+      toolNames,
       toolChoice: typeof parsed.tool_choice === 'string' ? parsed.tool_choice : (parsed.tool_choice ? 'structured' : 'unspecified'),
       systemPromptIncluded: Boolean(systemPrompt && parsed.messages.some(message =>
         message && ['system', 'developer'].includes(message.role) && messageText(message.content).includes(String(systemPrompt).trim()))),
@@ -153,5 +181,7 @@ module.exports = {
   ALLOWED_REASONING_LEVELS,
   ALLOWED_OUTPUT_TARGETS,
   GEMINI_25_THINKING_BUDGETS,
+  isGemini25ProModel,
+  getOpenCodeModelCapabilities,
   applyGenerationControls
 };
