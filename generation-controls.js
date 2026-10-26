@@ -126,7 +126,13 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
   delete parsed.max_completion_tokens;
   parsed.max_tokens = maxAllowed;
 
-  const toolDefinitions = Array.isArray(parsed.tools) ? parsed.tools.length : 0;
+  const toolItems = Array.isArray(parsed.tools) ? parsed.tools : [];
+  const toolDefinitions = toolItems.length;
+  const toolNames = [...new Set(toolItems.map(tool => {
+    if (!tool || typeof tool !== 'object') return '';
+    const name = tool.function && typeof tool.function.name === 'string' ? tool.function.name : tool.name;
+    return typeof name === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(name) ? name : '';
+  }).filter(Boolean))].slice(0, 40);
   return {
     body: parsed,
     diagnostics: {
@@ -141,6 +147,7 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
       outputTarget,
       maxAllowed,
       toolDefinitions,
+      toolNames,
       toolChoice: typeof parsed.tool_choice === 'string' ? parsed.tool_choice : (parsed.tool_choice ? 'structured' : 'unspecified'),
       systemPromptIncluded: Boolean(systemPrompt && parsed.messages.some(message =>
         message && ['system', 'developer'].includes(message.role) && messageText(message.content).includes(String(systemPrompt).trim()))),

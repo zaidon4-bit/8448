@@ -71,14 +71,14 @@ No Stripe secrets or Stripe webhook are needed for this manual mode.
 
 ## Admin performance and prompt controls
 
-In `/admin`, use **Assistant behavior** to set reasoning effort (`Low`, `Medium`, or `High`) and edit the global System Prompt. `Low` is the default for faster replies; on Gemini 2.5 Pro over Google's OpenAI-compatible schema this maps to the low thinking budget (about 1,024 thinking tokens), while `Medium` and `High` spend more reasoning. This setting only works if the selected upstream gateway accepts and forwards `reasoning_effort`. Gemini 2.5 Pro thinking cannot be disabled entirely.
+In `/admin`, the administrator edits the global System Prompt and manages users. Reasoning-level selection is not an admin control: each subscriber chooses their own level (`Low`, `Medium`, `High`, or `XHigh`) and toggles the Thinking Budget in the chat UI. For Gemini 2.5 Pro, these app levels are mapped to Google thinking budgets; `XHigh` maps to the model maximum and is an app-specific label, not a separate provider level. Gemini 2.5 Pro cannot be made to perform zero internal reasoning.
 
 When an active subscriber opens the workspace, the app starts OpenCode in the background to reduce worker startup delay on the first message. The initial `7,596 input tokens` shown in the earlier screenshot are input/context tokens (including the agent instructions and native tool definitions), not the number of reasoning tokens. The ~54-second response time likely included lazy worker startup and the upstream model's default thinking behavior; after deploying this change, compare a new simple greeting and inspect the reported duration.
 
 
 ## Subscriber reasoning controls
 
-Each subscribed user can choose Low, Medium, High, or XHigh from the chat composer. The setting is saved to that user’s account and is applied by the server-side provider proxy. The official Gemini 2.5 Pro OpenAI-compatible mapping documents Low, Medium, and High; XHigh is accepted by the application UI but maps to High for this model/API route, so it is not a distinct fourth Gemini 2.5 Pro effort level. Other providers may support different effort variants.
+Each subscribed user can choose Low, Medium, High, or XHigh from the chat composer. The setting is saved to that user’s account and is applied by the server-side provider proxy. The official Gemini 2.5 Pro OpenAI-compatible mapping documents Low, Medium, and High; this application additionally exposes XHigh as the model maximum fixed budget (32,768 tokens). XHigh is an application-defined budget preset, not a separate Google reasoning-level name. Other providers may support different effort variants.
 
 
 ## إعدادات التفكير والمهارات الشخصية
@@ -94,3 +94,27 @@ The current backend applies the saved administrator System Prompt to each upstre
 For Gemini 2.5 Pro, the proxy sends `extra_body.google.thinking_config.thinking_budget`: `-1` for dynamic mode or the selected fixed budget. It reserves output-token headroom for thinking tokens because Gemini counts thought tokens toward the total output limit. This proves the application sent the selected values, but only a real request to the configured OdiRouter model can prove that the gateway accepted and applied them.
 
 Long Answer Target is a strong prompt preference and output ceiling, not a guaranteed minimum output count. Greetings/simple questions are intentionally kept short. For substantive coding work, the updated prompt asks the agent not to return a terse summary and to include useful implementation, files changed, and tests/results.
+
+
+## Fix for `self-signed certificate in certificate chain` (Supabase)
+
+The app verifies the Supabase Postgres server certificate. A Render deploy will fail at startup until the configured root CA file exists. Do not set `NODE_TLS_REJECT_UNAUTHORIZED=0`. This exact error indicates that Node did not trust the certificate chain presented by the configured PostgreSQL endpoint. The file may be stale, wrong, or from a different database project; replacing application code alone cannot fix a mismatched trust anchor. The secure fix is to install the root CA for the actual Supabase project:
+
+1. In Supabase Dashboard, open **Database Settings → SSL Configuration** and download the database root certificate.
+2. In Render, open **Environment → Secret Files → Add Secret File**. Use filename `supabase-ca.crt` and paste the downloaded PEM certificate contents. Render exposes it inside Docker at `/etc/secrets/supabase-ca.crt`.
+3. `render.yaml` sets `SUPABASE_CA_CERT_PATH=/etc/secrets/supabase-ca.crt`. Save changes and redeploy.
+4. Keep the `DATABASE_URL` secret private. The app removes URL SSL query parameters before using its verified CA configuration, so the driver does not override the CA object. Confirm that `DATABASE_URL` came from the same Supabase project and uses its Session pooler/host. After deploying the diagnostic patch, the startup log also prints the database host, TLS mode, error code, and shortened stack trace; never paste the full connection URL into a public issue.
+
+The app also offers an explicit fallback for Supabase only: set `SUPABASE_TLS_MODE=compat`. This keeps TLS encryption but skips server-certificate verification, so it is less secure and should only be used temporarily if you accept that trade-off. Never set the process-wide `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
+## Tool and MCP availability
+
+The current worker configuration allows OpenCode's built-in tools inside each user's private workspace, enables hosted Exa web search through `OPENCODE_ENABLE_EXA=1`, and enables experimental LSP tools. Reviewer/tester/researcher subagents and bundled/personal skills are configured. This release does **not** configure any additional custom MCP server; MCP servers have to be added explicitly to the worker's OpenCode config, along with any required credentials and permission rules.
+
+## Reasoning levels and skills
+
+The chat offers Low, Medium, High, and XHigh, plus an independent **Enable Thinking Budget** toggle. For Gemini 2.5 Pro, the app maps these labels to Google documented budgets: Low=1,024, Medium=8,192, High=24,576, and XHigh=32,768 (maximum). XHigh is an app label rather than a Google-named level. When the toggle is off, the app requests dynamic reasoning with `thinking_budget=-1`; Gemini 2.5 Pro still uses internal reasoning, so this toggle does not truly disable the model's reasoning. Actual provider acceptance must be checked in Render logs.
+
+The admin-managed System Prompt is stored in the database and synchronized to `/var/data/admin-system-prompt.txt`; it is also enforced server-side in each outgoing model request. Built-in and personal skills use OpenCode's supported `~/.config/opencode/skills/<skill>/SKILL.md` layout. The OpenCode CLI is installed and validated during Docker image build.
+
+Admin-only live diagnostics are available at `/api/admin/diagnostics` after login. They report the OpenCode CLI version, bundled skills, active workers, database TLS mode/host, whether the database is reachable, the last request's tool definitions and upstream HTTP status, plus the latest task's actual OpenCode tool names. No API keys or prompt contents are returned. A tool-definition count greater than zero proves the schemas reached the provider gateway; `lastOpenCodeTaskDiagnostic.toolsUsed` is the end-to-end evidence that OpenCode actually executed tools. An upstream 2xx response confirms HTTP acceptance, but provider logs/behavior are still needed to prove that a gateway applied a thinking-budget extension.
