@@ -1,7 +1,13 @@
 'use strict';
 
-const ALLOWED_THINKING_BUDGETS = [4096, 8192, 16384, 24576, 32768];
+const ALLOWED_REASONING_LEVELS = ['low', 'medium', 'high', 'xhigh'];
 const ALLOWED_OUTPUT_TARGETS = [2000, 5000, 10000, 20000];
+const GEMINI_25_THINKING_BUDGETS = Object.freeze({
+  low: 1024,
+  medium: 8192,
+  high: 24576,
+  xhigh: 32768
+});
 const GEMINI_25_MAX_THINKING_BUDGET = 32768;
 const GEMINI_25_MAX_OUTPUT_TOKENS = 65536;
 
@@ -34,9 +40,6 @@ function addAdministratorPrompt(messages, systemPrompt) {
   if (!prompt) return false;
   const systemMessages = messages.filter(message => message && ['system', 'developer'].includes(message.role));
   if (systemMessages.some(message => messageText(message.content).includes(prompt))) return false;
-
-  // Keep OpenCode's own tool/system instructions intact, but ensure that the
-  // current admin-managed prompt is present in every actual upstream request.
   let insertAt = 0;
   while (insertAt < messages.length && messages[insertAt] && ['system', 'developer'].includes(messages[insertAt].role)) insertAt++;
   messages.splice(insertAt, 0, {
@@ -46,6 +49,22 @@ function addAdministratorPrompt(messages, systemPrompt) {
   return true;
 }
 
+function setGoogleThinkingBudget(body, actualThinkingBudget) {
+  const extraBody = body.extra_body && typeof body.extra_body === 'object' && !Array.isArray(body.extra_body)
+    ? body.extra_body : {};
+  const google = extraBody.google && typeof extraBody.google === 'object' && !Array.isArray(extraBody.google)
+    ? extraBody.google : {};
+  const thinkingConfig = google.thinking_config && typeof google.thinking_config === 'object' && !Array.isArray(google.thinking_config)
+    ? google.thinking_config : {};
+  body.extra_body = {
+    ...extraBody,
+    google: {
+      ...google,
+      thinking_config: { ...thinkingConfig, thinking_budget: actualThinkingBudget }
+    }
+  };
+}
+
 function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
   const parsed = structuredClone(requestBody || {});
   if (!Array.isArray(parsed.messages)) throw new Error('OpenAI-compatible request must include a messages array.');
@@ -53,19 +72,19 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
   const modelId = String(aiConfig && aiConfig.modelId || '');
   parsed.model = modelId;
   const isGemini25Pro = /gemini[\s_\/-]*2\.?5[\s_\/-]*pro/i.test(modelId);
-  const thinkingMode = user && user.thinking_mode === 'budget' ? 'budget' : 'auto';
-  const rawBudget = Number(user && user.thinking_budget);
-  const thinkingBudget = ALLOWED_THINKING_BUDGETS.includes(rawBudget) ? rawBudget : 8192;
+  const thinkingEnabled = !!(user && user.thinking_mode === 'budget');
+  const requestedLevel = String(user && user.reasoning_level || 'medium').trim().toLowerCase();
+  const reasoningLevel = ALLOWED_REASONING_LEVELS.includes(requestedLevel) ? requestedLevel : 'medium';
   const rawTarget = Number(user && user.output_target);
   const outputTarget = ALLOWED_OUTPUT_TARGETS.includes(rawTarget) ? rawTarget : 5000;
 
   const promptInjected = addAdministratorPrompt(parsed.messages, systemPrompt);
   const generationInstruction = [
-    'CodeCraft generation preferences for this request:',
-    `- Requested answer target: about ${outputTarget.toLocaleString('en-US')} generated output tokens for substantial coding, analysis, or detailed-explanation tasks.`,
-    '- Treat this as a strong length target when the task genuinely warrants detail. Do not be terse merely to be concise; complete the requested implementation, include necessary code and verification details, and explain changed files and results.',
-    '- Do not pad simple greetings or narrow questions. Never invent code, tests, facts, or token usage just to reach a length target.',
-    '- This target is not an API-enforced minimum; continue with useful detail when needed and stop when the task is complete.'
+    'CodeCraft response preferences for this request:',
+    `- Desired visible response target: about ${outputTarget.toLocaleString('en-US')} output tokens for substantial coding, analysis, or detailed-explanation tasks.`,
+    '- For substantial coding tasks, be complete rather than terse: implement the requested changes, include relevant code and verification details, and report changed files and actual test results.',
+    '- For greetings and simple questions, answer briefly; do not call tools unless they are genuinely needed.',
+    '- Never pad output, invent code, invent tests, or invent token usage to reach a target. A target guides the answer and is not a guaranteed minimum.'
   ].join('\n');
 
   let targetMessage = null;
@@ -73,52 +92,56 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
     const candidate = parsed.messages[i];
     if (candidate && ['system', 'developer'].includes(candidate.role)) { targetMessage = candidate; break; }
   }
-  if (!targetMessage) {
-    parsed.messages.unshift({ role: 'system', content: generationInstruction });
-  } else {
-    appendInstruction(targetMessage, generationInstruction);
-  }
+  if (!targetMessage) parsed.messages.unshift({ role: 'system', content: generationInstruction });
+  else appendInstruction(targetMessage, generationInstruction);
 
-  let actualThinkingBudget = null;
+  let effectiveReasoningEffort = null;
+  let thinkingBudget = null;
+  let reasoningParameter = null;
   let maxAllowed = outputTarget;
+
   if (isGemini25Pro) {
-    // Google documents these settings on the OpenAI-compatible REST body as
-    // extra_body.google.thinking_config.thinking_budget. Dynamic mode uses -1.
-    delete parsed.reasoning_effort; // these controls overlap for Gemini
-    parsed.extra_body = parsed.extra_body && typeof parsed.extra_body === 'object' && !Array.isArray(parsed.extra_body)
-      ? parsed.extra_body : {};
-    const previousGoogle = parsed.extra_body.google && typeof parsed.extra_body.google === 'object'
-      ? parsed.extra_body.google : {};
-    const previousThinkingConfig = previousGoogle.thinking_config && typeof previousGoogle.thinking_config === 'object'
-      ? previousGoogle.thinking_config : {};
-    actualThinkingBudget = thinkingMode === 'budget' ? thinkingBudget : -1;
-    parsed.extra_body.google = {
-      ...previousGoogle,
-      thinking_config: { ...previousThinkingConfig, thinking_budget: actualThinkingBudget }
-    };
-
-    // Gemini counts thought tokens against the total output ceiling. Leave room
-    // for maximum dynamic reasoning, or for the user's selected fixed budget.
-    const thinkingReservation = thinkingMode === 'budget' ? thinkingBudget : GEMINI_25_MAX_THINKING_BUDGET;
-    maxAllowed = Math.min(GEMINI_25_MAX_OUTPUT_TOKENS, outputTarget + thinkingReservation);
-  }
-
-  // Apply the selected target to the actual upstream request's output ceiling.
-  if (Object.prototype.hasOwnProperty.call(parsed, 'max_completion_tokens')) {
-    parsed.max_completion_tokens = maxAllowed;
-    delete parsed.max_tokens;
+    // Gemini 2.5 uses thinking budgets, not Gemini 3's reasoning-level API.
+    // In this provider gateway, the Google-specific setting is passed through
+    // the extra_body.google.thinking_config object. The adapter's real upstream
+    // acceptance must still be verified with a live OdiRouter request.
+    const actualThinkingBudget = thinkingEnabled ? GEMINI_25_THINKING_BUDGETS[reasoningLevel] : -1;
+    thinkingBudget = actualThinkingBudget;
+    setGoogleThinkingBudget(parsed, actualThinkingBudget);
+    delete parsed.reasoning_effort;
+    reasoningParameter = 'extra_body.google.thinking_config.thinking_budget';
+    effectiveReasoningEffort = reasoningLevel;
+    maxAllowed = Math.min(GEMINI_25_MAX_OUTPUT_TOKENS, outputTarget + (thinkingEnabled ? thinkingBudget : GEMINI_25_MAX_THINKING_BUDGET));
+  } else if (thinkingEnabled) {
+    // For non-Gemini-2.5 routes, use the OpenAI-compatible reasoning_effort
+    // extension only when the selected route is not the Google 2.5 budget API.
+    effectiveReasoningEffort = reasoningLevel;
+    parsed.reasoning_effort = effectiveReasoningEffort;
+    reasoningParameter = 'reasoning_effort';
+    maxAllowed = outputTarget;
   } else {
-    parsed.max_tokens = maxAllowed;
+    delete parsed.reasoning_effort;
   }
 
+  delete parsed.max_completion_tokens;
+  parsed.max_tokens = maxAllowed;
+
+  const toolDefinitions = Array.isArray(parsed.tools) ? parsed.tools.length : 0;
   return {
     body: parsed,
     diagnostics: {
       modelFamily: isGemini25Pro ? 'gemini-2.5-pro' : 'other',
-      thinkingMode,
-      thinkingBudget: actualThinkingBudget,
+      thinkingEnabled,
+      reasoningLevel,
+      requestedReasoningLevel: reasoningLevel,
+      effectiveReasoningEffort,
+      thinkingBudget,
+      estimatedThinkingBudget: thinkingBudget === -1 ? null : thinkingBudget,
+      reasoningParameter,
       outputTarget,
       maxAllowed,
+      toolDefinitions,
+      toolChoice: typeof parsed.tool_choice === 'string' ? parsed.tool_choice : (parsed.tool_choice ? 'structured' : 'unspecified'),
       systemPromptIncluded: Boolean(systemPrompt && parsed.messages.some(message =>
         message && ['system', 'developer'].includes(message.role) && messageText(message.content).includes(String(systemPrompt).trim()))),
       systemPromptInjected: promptInjected
@@ -127,7 +150,8 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
 }
 
 module.exports = {
-  ALLOWED_THINKING_BUDGETS,
+  ALLOWED_REASONING_LEVELS,
   ALLOWED_OUTPUT_TARGETS,
+  GEMINI_25_THINKING_BUDGETS,
   applyGenerationControls
 };
