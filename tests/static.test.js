@@ -195,10 +195,12 @@ test('per-user Thinking Budget supports dynamic mode and Google Gemini 2.5 confi
   assert.match(server, /thinking_mode TEXT NOT NULL DEFAULT 'auto'/);
   assert.match(server, /thinking_budget INTEGER NOT NULL DEFAULT 8192/);
   assert.match(server, /output_target INTEGER NOT NULL DEFAULT 5000/);
-  assert.match(server, /thinking_budget: thinkingMode === 'budget' \? thinkingBudget : -1/);
-  assert.match(server, /parsed\.extra_body\.google/);
-  assert.match(server, /allowedBudgets = \[4096, 8192, 16384, 24576, 32768\]/);
-  assert.match(server, /allowedOutputTargets = \[2000, 5000, 10000, 20000\]/);
+  assert.match(server, /applyGenerationControls/);
+  const controls = read('generation-controls.js');
+  assert.match(controls, /thinking_budget: actualThinkingBudget/);
+  assert.match(controls, /parsed\.extra_body\.google/);
+  assert.match(controls, /ALLOWED_THINKING_BUDGETS = \[4096, 8192, 16384, 24576, 32768\]/);
+  assert.match(controls, /ALLOWED_OUTPUT_TARGETS = \[2000, 5000, 10000, 20000\]/);
   assert.match(server, /app\.patch\('\/api\/user\/preferences', requireAuth, requireSubscription/);
   assert.match(html, /id="thinkingBudgetEnabled"/);
   assert.match(html, /id="thinkingBudget"/);
@@ -206,7 +208,8 @@ test('per-user Thinking Budget supports dynamic mode and Google Gemini 2.5 confi
   assert.match(client, /request\('\/api\/user\/preferences'/);
   assert.match(client, /JSON\.stringify\(desired\)/);
   assert.match(html, /Long Answer Target/);
-  assert.match(server, /guidance\/allowance, never a guaranteed minimum response/i);
+  assert.match(read('generation-controls.js'), /strong length target/i);
+  assert.match(read('generation-controls.js'), /not an API-enforced minimum/i);
 });
 
 test('OpenCode skills can be added privately per subscriber and are filesystem-safe', () => {
@@ -263,4 +266,77 @@ test('registration redirects to sign-in without auto-login, and sign-in routes w
   assert.match(app, /renderUser\(\);[\s\S]*?if \(currentUser && currentUser\.subscriptionActive\)/);
   assert.match(app, /\$\('chatInput'\)\.focus\(\)/);
   assert.doesNotMatch(app, /window\.location\.reload\(/);
+});
+
+test('generation settings are applied to the outgoing provider request, not just stored in the UI', () => {
+  const { applyGenerationControls } = require('../generation-controls');
+  const customPrompt = 'Follow the administrator rules and complete implementation plus tests.';
+  const request = {
+    model: 'managed/code-assistant',
+    messages: [
+      { role: 'system', content: 'OpenCode tool instructions.' },
+      { role: 'user', content: 'Implement a feature across files.' }
+    ]
+  };
+  const { body, diagnostics } = applyGenerationControls(request,
+    { thinking_mode: 'budget', thinking_budget: 16384, output_target: 10000 },
+    { modelId: 'free-gemini-2.5-pro' }, customPrompt);
+
+  assert.equal(body.model, 'free-gemini-2.5-pro');
+  assert.equal(body.extra_body.google.thinking_config.thinking_budget, 16384);
+  assert.equal(body.max_tokens, 26384);
+  assert.equal(diagnostics.systemPromptIncluded, true);
+  assert.equal(diagnostics.systemPromptInjected, true);
+  assert.ok(body.messages.some(message => typeof message.content === 'string' && message.content.includes(customPrompt)));
+  assert.ok(body.messages.some(message => message && ['system', 'developer'].includes(message.role) && String(message.content).includes('strong length target')));
+});
+
+test('automatic Gemini thinking uses the dynamic budget and reserves enough output headroom', () => {
+  const { applyGenerationControls } = require('../generation-controls');
+  const { body, diagnostics } = applyGenerationControls({ messages: [{ role: 'user', content: 'Write a multi-file project.' }] },
+    { thinking_mode: 'auto', thinking_budget: 8192, output_target: 20000 },
+    { modelId: 'free-gemini-2.5-pro' }, 'Always implement the requested project and verify it.');
+
+  assert.equal(body.extra_body.google.thinking_config.thinking_budget, -1);
+  assert.equal(body.max_tokens, 52768);
+  assert.equal(diagnostics.thinkingMode, 'auto');
+  assert.equal(diagnostics.maxAllowed, 52768);
+  assert.ok(body.messages.some(message => message.role === 'system' && message.content.includes('Always implement the requested project')));
+});
+
+test('administrator prompt is not duplicated when OpenCode already sent it', () => {
+  const { applyGenerationControls } = require('../generation-controls');
+  const prompt = 'Admin instruction marker: never be terse on coding tasks.';
+  const body = {
+    messages: [
+      { role: 'system', content: `OpenCode base instructions.\n\n${prompt}` },
+      { role: 'user', content: 'Build a program.' }
+    ]
+  };
+  const { body: result, diagnostics } = applyGenerationControls(body,
+    { thinking_mode: 'auto', thinking_budget: 8192, output_target: 5000 },
+    { modelId: 'other-model' }, prompt);
+  assert.equal(diagnostics.systemPromptInjected, false);
+  assert.equal(result.messages.filter(message => String(message.content || '').includes(prompt)).length, 1);
+  assert.equal(result.max_tokens, 5000);
+});
+
+test('Supabase PostgreSQL is supported as the persistent relational database with legacy SQLite migration', () => {
+  const server = read('server.js');
+  const pkg = read('package.json');
+  const render = read('render.yaml');
+  const docs = read('DEPLOY-AR.md');
+  assert.match(pkg, /"pg"/);
+  assert.match(server, /const DATABASE_URL = String\(process\.env\.DATABASE_URL/);
+  assert.match(server, /new Pool\(/);
+  assert.match(server, /Database backend: \$\{db\.isPostgres \? 'Supabase PostgreSQL' : 'local SQLite fallback'\}/);
+  assert.match(server, /CREATE TABLE IF NOT EXISTS users/);
+  assert.match(server, /CREATE TABLE IF NOT EXISTS chat_messages/);
+  assert.match(server, /CREATE TABLE IF NOT EXISTS app_settings/);
+  assert.match(server, /migrateLegacySqliteToSupabase/);
+  assert.match(server, /Imported legacy SQLite data into Supabase/);
+  assert.match(server, /database: db\.isPostgres \? 'supabase' : 'sqlite'/);
+  assert.match(render, /key: DATABASE_URL\s+sync: false/);
+  assert.match(docs, /Session pooler/);
+  assert.match(docs, /APP_ENCRYPTION_KEY.*exactly the same/s);
 });

@@ -14,11 +14,33 @@ const net = require('node:net');
 const http = require('node:http');
 const https = require('node:https');
 const { spawn, spawnSync } = require('node:child_process');
+const { applyGenerationControls } = require('./generation-controls');
 
 process.umask(0o077);
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+
+// Express 4 does not automatically forward rejected async route promises.
+// Wrap route handlers so a transient Supabase outage returns through the
+// normal error handler instead of leaving the request hanging.
+for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+  const original = app[method].bind(app);
+  app[method] = function registerRouteWithAsyncErrors(route, ...handlers) {
+    if (typeof route !== 'string' && !(route instanceof RegExp)) return original(route, ...handlers);
+    const wrapped = handlers.map(handler => {
+      if (typeof handler !== 'function' || handler.length === 4) return handler;
+      return function asyncErrorBoundary(req, res, next) {
+        try {
+          const result = handler(req, res, next);
+          if (result && typeof result.then === 'function') result.catch(next);
+          return result;
+        } catch (err) { return next(err); }
+      };
+    });
+    return original(route, ...wrapped);
+  };
+}
 
 const PORT = Number(process.env.PORT || 10000);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'storage'));
@@ -46,19 +68,92 @@ if (!SESSION_SECRET || SESSION_SECRET.length < 32) {
 }
 
 const DB_PATH = path.join(DATA_DIR, 'codecraft.sqlite');
-const db = new Database(DB_PATH);
-try { fs.chmodSync(DB_PATH, 0o600); } catch {}
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-db.exec(`
+const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
+let pgPool = null;
+let sqliteDb = null;
+let db;
+
+// Supabase PostgreSQL is the primary persistent store when DATABASE_URL is set.
+// SQLite remains as a local-development fallback and as a one-time migration source.
+if (DATABASE_URL) {
+  const { Pool, types } = require('pg');
+  // PostgreSQL int8 columns used by this app stay safely within JavaScript's
+  // integer range; parsing them as numbers avoids string/number ID mismatches.
+  types.setTypeParser(20, value => Number(value));
+  pgPool = new Pool({
+    connectionString: DATABASE_URL,
+    max: Math.max(2, Math.min(10, Number(process.env.DB_POOL_MAX || 5))),
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 12_000,
+    ssl: { rejectUnauthorized: true }
+  });
+  function pgSql(sql) {
+    let index = 0;
+    return String(sql).replace(/\?/g, () => `$${++index}`);
+  }
+  db = {
+    isPostgres: true,
+    prepare(sql) {
+      const text = pgSql(sql);
+      return {
+        get: async (...params) => (await pgPool.query(text, params)).rows[0],
+        all: async (...params) => (await pgPool.query(text, params)).rows,
+        run: async (...params) => {
+          const result = await pgPool.query(text, params);
+          return { changes: result.rowCount, rows: result.rows };
+        }
+      };
+    },
+    exec: async sql => pgPool.query(sql),
+    close: async () => pgPool.end()
+  };
+} else {
+  sqliteDb = new Database(DB_PATH);
+  try { fs.chmodSync(DB_PATH, 0o600); } catch {}
+  sqliteDb.pragma('journal_mode = WAL');
+  sqliteDb.pragma('foreign_keys = ON');
+  db = {
+    isPostgres: false,
+    prepare: sql => sqliteDb.prepare(sql),
+    exec: sql => sqliteDb.exec(sql),
+    pragma: sql => sqliteDb.pragma(sql),
+    close: () => sqliteDb.close()
+  };
+  if (process.env.NODE_ENV === 'production') {
+    console.warn('DATABASE_URL is not configured; using the local SQLite database. Configure Supabase on Render for remote persistence.');
+  }
+}
+
+const selectUserById = { get: (...params) => db.prepare('SELECT * FROM users WHERE id = ?').get(...params) };
+const selectUserByEmail = { get: (...params) => db.prepare('SELECT * FROM users WHERE email = ?').get(...params) };
+const insertMessage = { run: (...params) => db.prepare('INSERT INTO chat_messages (user_id, role, content, metadata_json) VALUES (?, ?, ?, ?)').run(...params) };
+const selectMessages = { all: (...params) => db.prepare('SELECT role, content, created_at, metadata_json FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?').all(...params) };
+
+const defaultSystemPrompt = fs.readFileSync(DEFAULT_SYSTEM_PROMPT_PATH, 'utf8').trim();
+const LEGACY_DEFAULT_SYSTEM_PROMPT_SHA256 = '23ed594eadbeb98e081567d90dd72ae8fa5d5e6fed0de274a6f87d4aa127498d';
+async function getAppSetting(key) {
+  const row = await db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key);
+  return row ? row.value : null;
+}
+async function setAppSetting(key, value) {
+  await db.prepare(`INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).run(key, String(value));
+}
+async function syncRuntimeSystemPrompt() {
+  const value = String(await getAppSetting('system_prompt') || defaultSystemPrompt).trim();
+  fs.writeFileSync(SYSTEM_PROMPT_PATH, `${value}\n`, { encoding: 'utf8', mode: 0o644 });
+  fs.chmodSync(SYSTEM_PROMPT_PATH, 0o644);
+}
+
+const DB_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     subscription_status TEXT NOT NULL DEFAULT 'inactive',
     subscription_source TEXT NOT NULL DEFAULT 'manual',
     subscription_requested_at TEXT,
-    subscription_current_period_end INTEGER,
+    subscription_current_period_end BIGINT,
     opencode_session_id TEXT,
     is_admin INTEGER NOT NULL DEFAULT 0,
     is_disabled INTEGER NOT NULL DEFAULT 0,
@@ -69,63 +164,133 @@ db.exec(`
     thinking_mode TEXT NOT NULL DEFAULT 'auto',
     thinking_budget INTEGER NOT NULL DEFAULT 8192,
     output_target INTEGER NOT NULL DEFAULT 5000,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS chat_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role TEXT NOT NULL CHECK(role IN ('user','assistant')),
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata_json TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_chat_messages_user_id_id ON chat_messages(user_id, id);
-`);
-// Additive migrations keep databases created by earlier versions compatible.
-const userColumns = new Set(db.pragma('table_info(users)').map(column => column.name));
-for (const [name, definition] of Object.entries({
-  is_admin: 'INTEGER NOT NULL DEFAULT 0',
-  is_disabled: 'INTEGER NOT NULL DEFAULT 0',
-  ai_base_url: 'TEXT',
-  ai_model_id: 'TEXT',
-  ai_api_key_encrypted: 'TEXT',
-  reasoning_level: 'TEXT',
-  thinking_mode: "TEXT NOT NULL DEFAULT 'auto'",
-  thinking_budget: 'INTEGER NOT NULL DEFAULT 8192',
-  output_target: 'INTEGER NOT NULL DEFAULT 5000',
-  subscription_source: "TEXT NOT NULL DEFAULT 'manual'",
-  subscription_requested_at: 'TEXT'
-})) {
-  if (!userColumns.has(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+`;
+
+async function migrateLegacySqliteToSupabase() {
+  if (!pgPool || process.env.MIGRATE_SQLITE_TO_SUPABASE === 'false' || !fs.existsSync(DB_PATH)) return;
+  const marker = await db.prepare('SELECT value FROM app_settings WHERE key = ?').get('legacy_sqlite_migration');
+  if (marker) return;
+  const target = await db.prepare('SELECT COUNT(*)::int AS count FROM users').get();
+  if (Number(target && target.count || 0) > 0) {
+    console.warn('Supabase already contains users; automatic SQLite import skipped to avoid overwriting existing records.');
+    await setAppSetting('legacy_sqlite_migration', 'skipped-existing-supabase-data');
+    return;
+  }
+  let legacy;
+  try {
+    legacy = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+    const tables = new Set(legacy.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name));
+    if (!tables.has('users')) { legacy.close(); return; }
+  } catch (err) {
+    try { if (legacy) legacy.close(); } catch {}
+    console.warn('Legacy SQLite migration source could not be opened:', err.message);
+    return;
+  }
+  const client = await pgPool.connect();
+  try {
+    const userRows = legacy.prepare('SELECT * FROM users ORDER BY id').all();
+    const messageRows = tablesHas(legacy, 'chat_messages') ? legacy.prepare('SELECT * FROM chat_messages ORDER BY id').all() : [];
+    const settingRows = tablesHas(legacy, 'app_settings') ? legacy.prepare('SELECT * FROM app_settings').all() : [];
+    await client.query('BEGIN');
+    const userFields = ['id','email','password_hash','subscription_status','subscription_source','subscription_requested_at','subscription_current_period_end','opencode_session_id','is_admin','is_disabled','ai_base_url','ai_model_id','ai_api_key_encrypted','reasoning_level','thinking_mode','thinking_budget','output_target','created_at'];
+    for (const row of userRows) {
+      const fallback = { subscription_status: 'inactive', subscription_source: 'manual', is_admin: 0, is_disabled: 0, thinking_mode: 'auto', thinking_budget: 8192, output_target: 5000, created_at: new Date().toISOString() };
+      const values = userFields.map(field => row[field] === undefined ? (fallback[field] === undefined ? null : fallback[field]) : row[field]);
+      const slots = values.map((_, i) => `$${i + 1}`).join(',');
+      await client.query(`INSERT INTO users(${userFields.join(',')}) VALUES(${slots}) ON CONFLICT (id) DO NOTHING`, values);
+    }
+    for (const row of messageRows) {
+      const values = [row.id, row.user_id, row.role, row.content, row.created_at || new Date().toISOString(), row.metadata_json || null];
+      await client.query('INSERT INTO chat_messages(id,user_id,role,content,created_at,metadata_json) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING', values);
+    }
+    for (const row of settingRows) {
+      await client.query('INSERT INTO app_settings(key,value,updated_at) VALUES($1,$2,$3) ON CONFLICT(key) DO NOTHING', [row.key, row.value, row.updated_at || new Date().toISOString()]);
+    }
+    await client.query("INSERT INTO app_settings(key,value,updated_at) VALUES('legacy_sqlite_migration','completed',CURRENT_TIMESTAMP) ON CONFLICT(key) DO NOTHING");
+    await client.query("SELECT setval(pg_get_serial_sequence('users','id'), COALESCE((SELECT MAX(id) FROM users), 1), EXISTS(SELECT 1 FROM users))");
+    await client.query("SELECT setval(pg_get_serial_sequence('chat_messages','id'), COALESCE((SELECT MAX(id) FROM chat_messages), 1), EXISTS(SELECT 1 FROM chat_messages))");
+    await client.query('COMMIT');
+    console.info(`Imported legacy SQLite data into Supabase: ${userRows.length} users, ${messageRows.length} chat messages, ${settingRows.length} settings.`);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch {}
+    throw err;
+  } finally {
+    client.release();
+    try { legacy.close(); } catch {}
+  }
+}
+function tablesHas(legacy, table) {
+  return !!legacy.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
 }
 
-const selectUserById = db.prepare('SELECT * FROM users WHERE id = ?');
-const selectUserByEmail = db.prepare('SELECT * FROM users WHERE email = ?');
-const chatColumns = new Set(db.pragma('table_info(chat_messages)').map(column => column.name));
-if (!chatColumns.has('metadata_json')) db.exec('ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT');
-const insertMessage = db.prepare('INSERT INTO chat_messages (user_id, role, content, metadata_json) VALUES (?, ?, ?, ?)');
-const selectMessages = db.prepare('SELECT role, content, created_at, metadata_json FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?');
+async function initializeDatabase() {
+  if (db.isPostgres) {
+    await db.exec(DB_SCHEMA_SQL);
+    await db.exec(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_source TEXT NOT NULL DEFAULT 'manual';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_requested_at TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS reasoning_level TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS thinking_mode TEXT NOT NULL DEFAULT 'auto';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS thinking_budget INTEGER NOT NULL DEFAULT 8192;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS output_target INTEGER NOT NULL DEFAULT 5000;
+      ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS metadata_json TEXT;
+    `);
+    await migrateLegacySqliteToSupabase();
+  } else {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+        subscription_status TEXT NOT NULL DEFAULT 'inactive', subscription_source TEXT NOT NULL DEFAULT 'manual',
+        subscription_requested_at TEXT, subscription_current_period_end INTEGER, opencode_session_id TEXT,
+        is_admin INTEGER NOT NULL DEFAULT 0, is_disabled INTEGER NOT NULL DEFAULT 0,
+        ai_base_url TEXT, ai_model_id TEXT, ai_api_key_encrypted TEXT, reasoning_level TEXT,
+        thinking_mode TEXT NOT NULL DEFAULT 'auto', thinking_budget INTEGER NOT NULL DEFAULT 8192,
+        output_target INTEGER NOT NULL DEFAULT 5000, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK(role IN ('user','assistant')), content TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, metadata_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_user_id_id ON chat_messages(user_id, id);
+      CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    `);
+    const userColumns = new Set(db.pragma('table_info(users)').map(column => column.name));
+    for (const [name, definition] of Object.entries({
+      is_admin: 'INTEGER NOT NULL DEFAULT 0', is_disabled: 'INTEGER NOT NULL DEFAULT 0',
+      ai_base_url: 'TEXT', ai_model_id: 'TEXT', ai_api_key_encrypted: 'TEXT', reasoning_level: 'TEXT',
+      thinking_mode: "TEXT NOT NULL DEFAULT 'auto'", thinking_budget: 'INTEGER NOT NULL DEFAULT 8192',
+      output_target: 'INTEGER NOT NULL DEFAULT 5000', subscription_source: "TEXT NOT NULL DEFAULT 'manual'",
+      subscription_requested_at: 'TEXT'
+    })) if (!userColumns.has(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
+    const chatColumns = new Set(db.pragma('table_info(chat_messages)').map(column => column.name));
+    if (!chatColumns.has('metadata_json')) db.exec('ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT');
+  }
+  const savedPrompt = await getAppSetting('system_prompt');
+  if (savedPrompt === null) await setAppSetting('system_prompt', defaultSystemPrompt);
+  else {
+    const savedPromptHash = crypto.createHash('sha256').update(String(savedPrompt).trim(), 'utf8').digest('hex');
+    if (savedPromptHash === LEGACY_DEFAULT_SYSTEM_PROMPT_SHA256) await setAppSetting('system_prompt', defaultSystemPrompt);
+  }
+  await syncRuntimeSystemPrompt();
+}
 
-db.exec(`CREATE TABLE IF NOT EXISTS app_settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)`);
-const getAppSettingStmt = db.prepare('SELECT value FROM app_settings WHERE key = ?');
-const setAppSettingStmt = db.prepare(`INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
-  ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`);
-function getAppSetting(key) {
-  const row = getAppSettingStmt.get(key);
-  return row ? row.value : null;
-}
-function setAppSetting(key, value) { setAppSettingStmt.run(key, String(value)); }
-const defaultSystemPrompt = fs.readFileSync(DEFAULT_SYSTEM_PROMPT_PATH, 'utf8').trim();
-if (getAppSetting('system_prompt') === null) setAppSetting('system_prompt', defaultSystemPrompt);
-function syncRuntimeSystemPrompt() {
-  const value = String(getAppSetting('system_prompt') || defaultSystemPrompt).trim();
-  fs.writeFileSync(SYSTEM_PROMPT_PATH, `${value}\n`, { encoding: 'utf8', mode: 0o644 });
-  fs.chmodSync(SYSTEM_PROMPT_PATH, 0o644);
-}
-syncRuntimeSystemPrompt();
 
 function isActiveSubscription(user) {
   if (!user || !['active', 'trialing'].includes(user.subscription_status)) return false;
@@ -263,7 +428,7 @@ const proxyServer = http.createServer((req, res) => {
       res.writeHead(401, { 'content-type': 'application/json' });
       return res.end('{"error":"unauthorized"}');
     }
-    const user = selectUserById.get(userId);
+    const user = await selectUserById.get(userId);
     if (!isActiveSubscription(user)) {
       res.writeHead(402, { 'content-type': 'application/json' });
       return res.end('{"error":"subscription_required"}');
@@ -312,63 +477,30 @@ const proxyServer = http.createServer((req, res) => {
       if (received > 12 * 1024 * 1024) req.destroy(new Error('request too large'));
       else chunks.push(chunk);
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       let body = Buffer.concat(chunks);
       if (requestPath === '/v1/chat/completions') {
         try {
           const parsed = JSON.parse(body.toString('utf8'));
-          // The browser/agent sees only a neutral model alias. The server maps
-          // that alias to the privately configured upstream model.
-          parsed.model = aiConfig.modelId;
-          // Per-user generation preferences. Google documents the OpenAI-compatible
-          // `extra_body.google.thinking_config.thinking_budget` extension for Gemini 2.5.
-          // -1 keeps dynamic thinking; an explicit budget uses the selected target.
-          const thinkingMode = user && user.thinking_mode === 'budget' ? 'budget' : 'auto';
-          const allowedBudgets = [4096, 8192, 16384, 24576, 32768];
-          const thinkingBudget = allowedBudgets.includes(Number(user && user.thinking_budget))
-            ? Number(user.thinking_budget) : 8192;
-          const allowedOutputTargets = [2000, 5000, 10000, 20000];
-          const outputTarget = allowedOutputTargets.includes(Number(user && user.output_target))
-            ? Number(user.output_target) : 5000;
-          const isGemini25Pro = /gemini[\s_\/-]*2\.?5[\s_\/-]*pro/i.test(aiConfig.modelId);
-          const effectiveThinkingBudget = thinkingMode === 'budget' ? thinkingBudget : 8192;
-          if (isGemini25Pro) {
-            // Do not send reasoning_effort as well: Google documents these controls
-            // as overlapping. Gateways which support Google's OpenAI-compat layer
-            // should forward this provider-specific extension.
-            delete parsed.reasoning_effort;
-            parsed.extra_body = parsed.extra_body && typeof parsed.extra_body === 'object' && !Array.isArray(parsed.extra_body)
-              ? parsed.extra_body : {};
-            const google = parsed.extra_body.google && typeof parsed.extra_body.google === 'object'
-              ? parsed.extra_body.google : {};
-            const thinkingConfig = google.thinking_config && typeof google.thinking_config === 'object'
-              ? google.thinking_config : {};
-            parsed.extra_body.google = {
-              ...google,
-              thinking_config: { ...thinkingConfig, thinking_budget: thinkingMode === 'budget' ? thinkingBudget : -1 }
-            };
-          }
-          // Gemini's max-output limit includes thought tokens, so reserve room for
-          // both the selected user-facing answer target and the thinking budget.
-          // A target is guidance/allowance, never a guaranteed minimum response.
-          const maxAllowed = Math.min(65536, outputTarget + (isGemini25Pro ? effectiveThinkingBudget : 0));
-          if (Object.prototype.hasOwnProperty.call(parsed, 'max_completion_tokens')) {
-            parsed.max_completion_tokens = maxAllowed;
-            delete parsed.max_tokens;
-          } else {
-            parsed.max_tokens = maxAllowed;
-          }
-          const lengthInstruction = `User response-length preference: for substantial coding tasks, aim for approximately ${outputTarget.toLocaleString('en-US')} output tokens when needed for code, files, or a detailed explanation. This is a target/allowance, not a minimum guarantee. Keep greetings and simple questions concise; never pad the answer, invent content, or omit required implementation and verification.`;
-          if (Array.isArray(parsed.messages)) {
-            const systemMessage = parsed.messages.find(message => message && ['system', 'developer'].includes(message.role));
-            if (!systemMessage) parsed.messages.unshift({ role: 'system', content: lengthInstruction });
-            else if (typeof systemMessage.content === 'string') systemMessage.content += `\n\n${lengthInstruction}`;
-            else if (Array.isArray(systemMessage.content)) systemMessage.content.push({ type: 'text', text: lengthInstruction });
-          }
-          body = Buffer.from(JSON.stringify(parsed));
-        } catch {
+          const activeSystemPrompt = String((await getAppSetting('system_prompt')) || defaultSystemPrompt).trim();
+          const transformed = applyGenerationControls(parsed, user, aiConfig, activeSystemPrompt);
+          body = Buffer.from(JSON.stringify(transformed.body));
+          // Operational proof without logging prompts or credentials. This makes
+          // it possible to diagnose whether the stored settings reached the gateway.
+          console.info('Generation controls applied:', JSON.stringify({
+            userId,
+            modelFamily: transformed.diagnostics.modelFamily,
+            thinkingMode: transformed.diagnostics.thinkingMode,
+            thinkingBudget: transformed.diagnostics.thinkingBudget,
+            outputTarget: transformed.diagnostics.outputTarget,
+            maxAllowed: transformed.diagnostics.maxAllowed,
+            systemPromptIncluded: transformed.diagnostics.systemPromptIncluded,
+            systemPromptInjected: transformed.diagnostics.systemPromptInjected
+          }));
+        } catch (err) {
+          console.warn('Could not prepare OpenAI-compatible request:', String(err && err.message || err));
           res.writeHead(400, { 'content-type': 'application/json' });
-          return res.end('{"error":"invalid_request"}');
+          return res.end('{"error":"invalid_request_or_generation_settings"}');
         }
       }
       const headers = { ...req.headers };
@@ -727,11 +859,12 @@ const chatLimiter = rateLimit({ windowMs: 60 * 1000, limit: 12, standardHeaders:
 function attachAuth(req, res, next) {
   const token = req.cookiesToken || parseCookie(req.headers.cookie || '', COOKIE_NAME);
   if (!token) { req.authUser = null; return next(); }
-  try {
-    const payload = jwt.verify(token, SESSION_SECRET, { issuer: 'codecraft-membership' });
-    req.authUser = selectUserById.get(Number(payload.sub)) || null;
-  } catch { req.authUser = null; }
-  next();
+  let payload;
+  try { payload = jwt.verify(token, SESSION_SECRET, { issuer: 'codecraft-membership' }); }
+  catch { req.authUser = null; return next(); }
+  Promise.resolve(selectUserById.get(Number(payload.sub)))
+    .then(user => { req.authUser = user || null; next(); })
+    .catch(next);
 }
 function parseCookie(cookieHeader, name) {
   for (const part of cookieHeader.split(';')) {
@@ -762,7 +895,7 @@ function setSessionCookie(res, userId) {
 }
 function normalizeEmail(email) { return String(email || '').trim().toLowerCase(); }
 function validEmail(email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254; }
-function bootstrapAdminAccount() {
+async function bootstrapAdminAccount() {
   const email = normalizeEmail(process.env.ADMIN_EMAIL);
   const password = String(process.env.ADMIN_PASSWORD || '');
   if (!email || !password) return;
@@ -771,13 +904,14 @@ function bootstrapAdminAccount() {
     return;
   }
   const passwordHash = bcrypt.hashSync(password, 12);
-  const existing = selectUserByEmail.get(email);
-  if (existing) db.prepare('UPDATE users SET password_hash = ?, is_admin = 1, is_disabled = 0 WHERE id = ?').run(passwordHash, existing.id);
-  else db.prepare('INSERT INTO users(email, password_hash, is_admin) VALUES(?, ?, 1)').run(email, passwordHash);
+  const existing = await selectUserByEmail.get(email);
+  if (existing) await db.prepare('UPDATE users SET password_hash = ?, is_admin = 1, is_disabled = 0 WHERE id = ?').run(passwordHash, existing.id);
+  else await db.prepare('INSERT INTO users(email, password_hash, is_admin) VALUES(?, ?, 1)').run(email, passwordHash);
 }
-bootstrapAdminAccount();
-
-app.get('/healthz', (req, res) => res.status(200).json({ ok: true, service: 'codecraft' }));
+app.get('/healthz', async (req, res) => {
+  try { await db.prepare('SELECT 1 AS ok').get(); res.status(200).json({ ok: true, service: 'codecraft', database: db.isPostgres ? 'supabase' : 'sqlite' }); }
+  catch { res.status(503).json({ ok: false, service: 'codecraft', database: 'unavailable' }); }
+});
 app.get('/api/config', (req, res) => res.json({
   productName: process.env.PRODUCT_NAME || 'CodeCraft Studio',
   subscriptionPriceLabel: process.env.SUBSCRIPTION_DISPLAY_PRICE || 'Manual activation after administrator review',
@@ -790,24 +924,24 @@ app.get('/api/me', (req, res) => {
   attachAuth(req, res, () => res.json({ user: req.authUser ? serializeUser(req.authUser) : null }));
 });
 app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
-app.get('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+app.get('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({
-    systemPrompt: getAppSetting('system_prompt') || defaultSystemPrompt,
+    systemPrompt: (await getAppSetting('system_prompt')) || defaultSystemPrompt,
     defaultSystemPrompt
   });
 });
-app.patch('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+app.patch('/api/admin/settings', requireAuth, requireAdmin, async (req, res) => {
   const body = req.body || {};
   const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : null;
   if (systemPrompt !== null && (!systemPrompt || systemPrompt.length > 40000)) {
     return res.status(400).json({ error: 'System Prompt must contain 1 to 40,000 characters.' });
   }
-  const previousPrompt = getAppSetting('system_prompt') || defaultSystemPrompt;
-  if (systemPrompt !== null) setAppSetting('system_prompt', systemPrompt);
+  const previousPrompt = (await getAppSetting('system_prompt')) || defaultSystemPrompt;
+  if (systemPrompt !== null) await setAppSetting('system_prompt', systemPrompt);
   try {
     if (systemPrompt !== null && systemPrompt !== previousPrompt) {
-      syncRuntimeSystemPrompt();
+      await syncRuntimeSystemPrompt();
       // Workers read the system prompt when their configuration starts. Restart
       // them so the admin's prompt applies to subsequent requests.
       for (const userId of [...instances.keys()]) stopInstance(userId);
@@ -819,10 +953,10 @@ app.patch('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, promptUpdated: systemPrompt !== null && systemPrompt !== previousPrompt });
 });
-app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
-  const users = db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status, subscription_source,
+app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  const users = (await db.prepare(`SELECT id, email, is_admin, is_disabled, subscription_status, subscription_source,
     subscription_requested_at, subscription_current_period_end, ai_base_url, ai_model_id, ai_api_key_encrypted, created_at
-    FROM users ORDER BY id DESC LIMIT 500`).all().map(user => ({
+    FROM users ORDER BY id DESC LIMIT 500`).all()).map(user => ({
       id: user.id,
       email: user.email,
       isAdmin: user.is_admin === 1,
@@ -841,10 +975,10 @@ app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ users });
 });
-app.post('/api/admin/users/:id/subscription', requireAuth, requireAdmin, (req, res) => {
+app.post('/api/admin/users/:id/subscription', requireAuth, requireAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
-  const user = selectUserById.get(userId);
+  const user = await selectUserById.get(userId);
   if (!user) return res.status(404).json({ error: 'User not found.' });
   const action = String((req.body && req.body.action) || '');
   if (!['activate', 'deactivate'].includes(action)) return res.status(400).json({ error: 'Invalid membership action.' });
@@ -855,30 +989,30 @@ app.post('/api/admin/users/:id/subscription', requireAuth, requireAdmin, (req, r
       return res.status(400).json({ error: 'Membership duration must be between 1 and 3650 days.' });
     }
     const endAt = Math.floor(Date.now() / 1000) + rawDays * 86400;
-    db.prepare(`UPDATE users SET subscription_status = 'active', subscription_source = 'manual',
+    await db.prepare(`UPDATE users SET subscription_status = 'active', subscription_source = 'manual',
       subscription_current_period_end = ?, subscription_requested_at = NULL WHERE id = ?`).run(endAt, userId);
     stopInstance(userId);
-    const updated = selectUserById.get(userId);
+    const updated = await selectUserById.get(userId);
     return res.json({ ok: true, user: { id: updated.id, email: updated.email,
       subscriptionStatus: updated.subscription_status, subscriptionActive: isActiveSubscription(updated),
       subscriptionSource: updated.subscription_source, subscriptionCurrentPeriodEnd: updated.subscription_current_period_end,
       subscriptionRequestedAt: updated.subscription_requested_at } });
   }
 
-  db.prepare(`UPDATE users SET subscription_status = 'inactive', subscription_source = 'manual',
+  await db.prepare(`UPDATE users SET subscription_status = 'inactive', subscription_source = 'manual',
     subscription_current_period_end = NULL, subscription_requested_at = NULL WHERE id = ?`).run(userId);
   stopInstance(userId);
-  const updated = selectUserById.get(userId);
+  const updated = await selectUserById.get(userId);
   res.json({ ok: true, user: { id: updated.id, email: updated.email,
     subscriptionStatus: updated.subscription_status, subscriptionActive: isActiveSubscription(updated),
     subscriptionSource: updated.subscription_source, subscriptionCurrentPeriodEnd: updated.subscription_current_period_end,
     subscriptionRequestedAt: updated.subscription_requested_at } });
 });
 
-app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
+app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
-  const user = selectUserById.get(userId);
+  const user = await selectUserById.get(userId);
   if (!user) return res.status(404).json({ error: 'User not found.' });
   const body = req.body || {};
   const isDisabled = typeof body.isDisabled === 'boolean' ? Number(body.isDisabled) : user.is_disabled;
@@ -913,10 +1047,10 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
     }
     if (encryptedKey && (!baseUrl || !modelId)) return res.status(400).json({ error: 'The API URL and model ID cannot be blank while an API key is saved.' });
   }
-  db.prepare('UPDATE users SET is_disabled = ?, ai_base_url = ?, ai_model_id = ?, ai_api_key_encrypted = ? WHERE id = ?')
+  await db.prepare('UPDATE users SET is_disabled = ?, ai_base_url = ?, ai_model_id = ?, ai_api_key_encrypted = ? WHERE id = ?')
     .run(isDisabled, baseUrl || null, modelId || null, encryptedKey, userId);
   stopInstance(userId);
-  const updated = selectUserById.get(userId);
+  const updated = await selectUserById.get(userId);
   res.set('Cache-Control', 'no-store');
   res.json({ user: { id: updated.id, email: updated.email, isDisabled: updated.is_disabled === 1,
     apiConfigured: !!(updated.ai_base_url && updated.ai_model_id && updated.ai_api_key_encrypted),
@@ -927,15 +1061,15 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
   const password = String(req.body && req.body.password || '');
   if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
   if (password.length < 10 || Buffer.byteLength(password, 'utf8') > 72) return res.status(400).json({ error: 'Password must be at least 10 characters and no more than 72 bytes.' });
-  if (selectUserByEmail.get(email)) return res.status(409).json({ error: 'This email is already registered. Please sign in instead.' });
+  if (await selectUserByEmail.get(email)) return res.status(409).json({ error: 'This email is already registered. Please sign in instead.' });
   try {
     const hash = await bcrypt.hash(password, 12);
-    db.prepare('INSERT INTO users(email, password_hash) VALUES(?, ?)').run(email, hash);
+    await db.prepare('INSERT INTO users(email, password_hash) VALUES(?, ?)').run(email, hash);
     // Registration intentionally does not sign the user in. The client returns
     // to the sign-in form, where the new credentials are verified explicitly.
     res.status(201).json({ created: true, message: 'Account created. Please sign in to continue.' });
   } catch (err) {
-    if (String(err.code) === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'This email is already registered.' });
+    if (['SQLITE_CONSTRAINT_UNIQUE', '23505'].includes(String(err.code))) return res.status(409).json({ error: 'This email is already registered.' });
     console.error('Registration failed:', err.message);
     res.status(500).json({ error: 'Unable to create the account right now. Please try again.' });
   }
@@ -943,7 +1077,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
 app.post('/api/auth/login', authLimiter, async (req, res) => {
   const email = normalizeEmail(req.body && req.body.email);
   const password = String(req.body && req.body.password || '');
-  const user = selectUserByEmail.get(email);
+  const user = await selectUserByEmail.get(email);
   if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: 'Email or password is incorrect.' });
   setSessionCookie(res, user.id);
   res.json({ user: serializeUser(user) });
@@ -953,12 +1087,12 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/billing/request-activation', requireAuth, (req, res) => {
-  const user = selectUserById.get(req.authUser.id);
+app.post('/api/billing/request-activation', requireAuth, async (req, res) => {
+  const user = await selectUserById.get(req.authUser.id);
   if (isActiveSubscription(user)) return res.status(409).json({ error: 'Your subscription is already active.' });
-  db.prepare(`UPDATE users SET subscription_requested_at = COALESCE(subscription_requested_at, CURRENT_TIMESTAMP),
-    subscription_source = 'manual' WHERE id = ?`).run(user.id);
-  const updated = selectUserById.get(user.id);
+  await db.prepare(`UPDATE users SET subscription_requested_at = COALESCE(subscription_requested_at, ?),
+    subscription_source = 'manual' WHERE id = ?`).run(new Date().toISOString(), user.id);
+  const updated = await selectUserById.get(user.id);
   res.status(202).json({ ok: true, subscriptionRequestedAt: updated.subscription_requested_at,
     message: 'Your activation request has been submitted. An administrator will review and activate it manually.' });
 });
@@ -982,14 +1116,14 @@ function userPreferencePayload(user) {
     note: 'Automatic mode lets the model choose its reasoning budget. Custom thinking budgets depend on support from the configured model connection. Answer targets guide the response but cannot guarantee a minimum token count.'
   };
 }
-app.get('/api/user/preferences', requireAuth, requireSubscription, (req, res) => {
-  const user = selectUserById.get(req.authUser.id);
+app.get('/api/user/preferences', requireAuth, requireSubscription, async (req, res) => {
+  const user = await selectUserById.get(req.authUser.id);
   res.set('Cache-Control', 'no-store');
   res.json(userPreferencePayload(user));
 });
-app.patch('/api/user/preferences', requireAuth, requireSubscription, (req, res) => {
+app.patch('/api/user/preferences', requireAuth, requireSubscription, async (req, res) => {
   const body = req.body || {};
-  const user = selectUserById.get(req.authUser.id);
+  const user = await selectUserById.get(req.authUser.id);
   const thinkingMode = body.thinkingMode === undefined
     ? (user && user.thinking_mode === 'budget' ? 'budget' : 'auto')
     : String(body.thinkingMode).trim().toLowerCase();
@@ -1002,9 +1136,9 @@ app.patch('/api/user/preferences', requireAuth, requireSubscription, (req, res) 
   if (!['auto', 'budget'].includes(thinkingMode)) return res.status(400).json({ error: 'Thinking mode must be auto or budget.' });
   if (!ALLOWED_THINKING_BUDGETS.includes(thinkingBudget)) return res.status(400).json({ error: 'Choose a supported thinking budget.' });
   if (!ALLOWED_OUTPUT_TARGETS.includes(outputTarget)) return res.status(400).json({ error: 'Choose a supported long-answer target.' });
-  db.prepare('UPDATE users SET thinking_mode = ?, thinking_budget = ?, output_target = ? WHERE id = ?')
+  await db.prepare('UPDATE users SET thinking_mode = ?, thinking_budget = ?, output_target = ? WHERE id = ?')
     .run(thinkingMode, thinkingBudget, outputTarget, req.authUser.id);
-  const updated = selectUserById.get(req.authUser.id);
+  const updated = await selectUserById.get(req.authUser.id);
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ...userPreferencePayload(updated) });
 });
@@ -1059,7 +1193,7 @@ function readCustomSkills(homeDir) {
     }).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
 }
 const skillChangeLimiter = rateLimit({ windowMs: 60 * 1000, limit: 12, standardHeaders: 'draft-7', legacyHeaders: false, keyGenerator: req => String(req.authUser.id) });
-app.get('/api/user/skills', requireAuth, requireSubscription, (req, res) => {
+app.get('/api/user/skills', requireAuth, requireSubscription, async (req, res) => {
   const homeDir = path.join(HOMES_DIR, String(req.authUser.id));
   try {
     res.set('Cache-Control', 'no-store');
@@ -1079,7 +1213,7 @@ app.post('/api/user/skills', requireAuth, requireSubscription, skillChangeLimite
   if (instructions.length < 20 || instructions.length > 12000) return res.status(400).json({ error: 'Skill instructions must contain 20–12,000 characters.' });
   const slug = skillSlugFromName(name);
   if (!slug || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return res.status(400).json({ error: 'Use an English name with letters or numbers so OpenCode can create a valid skill ID.' });
-  const user = selectUserById.get(req.authUser.id);
+  const user = await selectUserById.get(req.authUser.id);
   const existing = instances.get(user.id);
   if (existing && existing.ready && existing.busy) return res.status(409).json({ error: 'Wait for the current coding task to finish before changing skills.' });
   let instance;
@@ -1133,16 +1267,16 @@ app.delete('/api/user/skills/:id', requireAuth, requireSubscription, skillChange
   }
 });
 
-app.get('/api/chat/history', requireAuth, requireSubscription, (req, res) => {
-  const rows = selectMessages.all(req.authUser.id, 80).reverse().map(row => {
+app.get('/api/chat/history', requireAuth, requireSubscription, async (req, res) => {
+  const rows = (await selectMessages.all(req.authUser.id, 80)).reverse().map(row => {
     let metadata = null;
     if (row.metadata_json) { try { metadata = JSON.parse(row.metadata_json); } catch {} }
     return { role: row.role, content: row.content, created_at: row.created_at, metadata };
   });
   res.json({ messages: rows });
 });
-app.post('/api/chat/warmup', requireAuth, requireSubscription, (req, res) => {
-  const user = selectUserById.get(req.authUser.id);
+app.post('/api/chat/warmup', requireAuth, requireSubscription, async (req, res) => {
+  const user = await selectUserById.get(req.authUser.id);
   if (!aiConfigReady(user)) return res.status(503).json({ error: 'AI connection is not configured for this account.' });
   // Start OpenCode in the background while the user is viewing the workspace,
   // rather than charging its cold-start time to the first chat response.
@@ -1157,7 +1291,7 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
   const prompt = String(req.body && req.body.message || '').trim();
   if (!prompt) return res.status(400).json({ error: 'Enter a task before sending.' });
   if (prompt.length > 30_000) return res.status(413).json({ error: 'Your message is too long. Keep it under 30,000 characters.' });
-  const userNow = selectUserById.get(req.authUser.id);
+  const userNow = await selectUserById.get(req.authUser.id);
   if (!aiConfigReady(userNow)) return res.status(503).json({ error: 'The coding assistant is not configured for this account yet. Please contact the administrator.' });
   try {
     if (!isActiveSubscription(userNow)) return res.status(402).json({ error: 'Your subscription has expired or needs renewal.' });
@@ -1167,7 +1301,7 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
       const create = await openCodeFetch(instance, '/session', { method: 'POST', body: JSON.stringify({ title: prompt.slice(0, 90) }) });
       if (!create.ok) throw new Error(`OpenCode session creation failed (${create.status})`);
       const session = await create.json();
-      db.prepare('UPDATE users SET opencode_session_id = ? WHERE id = ?').run(session.id, userNow.id);
+      await db.prepare('UPDATE users SET opencode_session_id = ? WHERE id = ?').run(session.id, userNow.id);
       userNow.opencode_session_id = session.id;
     }
     const url = `/session/${encodeURIComponent(userNow.opencode_session_id)}/message`;
@@ -1189,8 +1323,8 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
     const durationMs = Date.now() - requestStartedAt;
     const tokenUsage = summarizeTokenUsage(payload.info || payload.message && payload.message.info || {});
     const metadata = { durationMs, tokenUsage };
-    insertMessage.run(userNow.id, 'user', prompt, null);
-    insertMessage.run(userNow.id, 'assistant', finalText, JSON.stringify(metadata));
+    await insertMessage.run(userNow.id, 'user', prompt, null);
+    await insertMessage.run(userNow.id, 'assistant', finalText, JSON.stringify(metadata));
     res.json({ answer: finalText, toolsUsed, sessionId: userNow.opencode_session_id, durationMs, tokenUsage });
   } catch (err) {
     console.error(`Coding request failed for user ${req.authUser.id}:`, err && err.message ? err.message : 'unknown error');
@@ -1200,8 +1334,8 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
     if (instance) { instance.busy = false; instance.lastUsedAt = Date.now(); }
   }
 });
-app.post('/api/chat/new', requireAuth, requireSubscription, (req, res) => {
-  db.prepare('UPDATE users SET opencode_session_id = NULL WHERE id = ?').run(req.authUser.id);
+app.post('/api/chat/new', requireAuth, requireSubscription, async (req, res) => {
+  await db.prepare('UPDATE users SET opencode_session_id = NULL WHERE id = ?').run(req.authUser.id);
   res.json({ ok: true });
 });
 
@@ -1210,7 +1344,7 @@ app.post('/api/workspace/upload', requireAuth, requireSubscription, (req, res, n
   uploadMiddleware(req, res, err => { if (err) return res.status(400).json({ error: 'Unable to upload files. The limit is 30 files, up to 5 MB each.' }); next(); });
 }, async (req, res) => {
   try {
-    const user = selectUserById.get(req.authUser.id);
+    const user = await selectUserById.get(req.authUser.id);
     if (!aiConfigReady(user)) return res.status(503).json({ error: 'The coding assistant is not configured for this account yet. Please contact the administrator.' });
     const instance = await ensureOpenCodeForUser(user);
     const inputPaths = JSON.parse(String(req.body && req.body.paths || '[]'));
@@ -1300,20 +1434,32 @@ app.use((err, req, res, next) => {
   return res.status(500).json({ error: 'An internal error occurred. Please try again.' });
 });
 
-const appServer = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`CodeCraft web service listening on port ${PORT}`);
-  if (!aiConfigReady()) console.warn('No default AI API configured. Assign a user-specific API from /admin before testing the coding workspace.');
-  console.log('Subscription approvals are handled manually in /admin.');
+let appServer = null;
+let proxyListening = false;
+async function startServer() {
+  await initializeDatabase();
+  await bootstrapAdminAccount();
+  appServer = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`CodeCraft web service listening on port ${PORT}`);
+    console.log(`Database backend: ${db.isPostgres ? 'Supabase PostgreSQL' : 'local SQLite fallback'}`);
+    if (!aiConfigReady()) console.warn('No default AI API configured. Assign a user-specific API from /admin before testing the coding workspace.');
+    console.log('Subscription approvals are handled manually in /admin.');
+  });
+  proxyServer.listen(AI_PROXY_PORT, AI_PROXY_HOST, () => { proxyListening = true; console.log('Internal AI gateway listening on loopback.'); });
+}
+startServer().catch(err => {
+  console.error('Application startup failed:', err && err.message ? err.message : 'unknown error');
+  process.exit(1);
 });
-proxyServer.listen(AI_PROXY_PORT, AI_PROXY_HOST, () => console.log('Internal AI gateway listening on loopback.'));
 
 function handleShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`Received ${signal}; stopping coding workers.`);
   for (const userId of [...instances.keys()]) stopInstance(userId);
-  proxyServer.close();
-  appServer.close(() => { try { db.close(); } catch {} process.exit(0); });
+  if (proxyListening) proxyServer.close();
+  const finish = async () => { try { await db.close(); } catch {} process.exit(0); };
+  if (appServer) appServer.close(finish); else finish();
   setTimeout(() => process.exit(0), 6_000).unref();
 }
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));

@@ -13,7 +13,16 @@ Push the contents of this directory to the repository root, keeping `render.yaml
 3. The service uses Docker, the Starter plan, and a 2 GB persistent disk mounted at `/var/data`. Check Render's current price before deploying.
 4. After the deploy succeeds, open the public service URL shown by Render.
 
-## 3. Environment variables
+## 3. Supabase database setup
+
+1. Create a project in Supabase.
+2. Open **Connect** in the Supabase Dashboard and copy the PostgreSQL connection string for **Session pooler** (recommended for IPv4-compatible hosted backends). Use the exact host, username, and port shown there; do not invent the pooler host. If the database password contains special characters, URL-encode them in the connection string.
+3. In Render → your service → **Environment**, add `DATABASE_URL` and paste the full connection string. Keep it secret. The app creates its tables at startup.
+4. On first connection, if the existing Render disk has `codecraft.sqlite` and the Supabase database has no users yet, the app imports existing user accounts, chat history, saved settings, subscription data, encrypted API credentials, and prompt settings automatically. Keep `APP_ENCRYPTION_KEY` exactly the same to preserve access to the encrypted API keys. If Supabase already contains users, automatic migration is skipped to prevent overwriting records.
+5. The app keeps uploaded projects, OpenCode user homes, skills, and workspaces on the Render persistent disk mounted at `/var/data`; Supabase does not replace that file storage.
+6. Visit `/healthz`; when connected it returns `database: \"supabase\"`. If it reports `sqlite`, `DATABASE_URL` is not configured.
+
+## 4. Environment variables
 
 Required:
 
@@ -34,7 +43,7 @@ If neither route fully configures a user's connection, their chat will report th
 
 Optional defaults in the Blueprint are `MAX_ACTIVE_OPENCODE_INSTANCES=2`, `AI_REQUESTS_PER_MINUTE=15`, and `SUBSCRIPTION_DISPLAY_PRICE=Manual activation after administrator review`.
 
-## 4. Manual membership approval
+## 5. Manual membership approval
 
 1. A user registers and requests membership review.
 2. The administrator independently verifies the payment/approval.
@@ -44,7 +53,7 @@ Optional defaults in the Blueprint are `MAX_ACTIVE_OPENCODE_INSTANCES=2`, `AI_RE
 
 No Stripe secrets or Stripe webhook are needed for this manual mode.
 
-## 5. Deployment smoke tests
+## 6. Deployment smoke tests
 
 1. Visit `/healthz` and confirm `ok: true`.
 2. Register a normal user and confirm workspace access is blocked before membership approval.
@@ -53,10 +62,10 @@ No Stripe secrets or Stripe webhook are needed for this manual mode.
 5. Test web search separately. Exa access is enabled for the worker; actual search capability can still depend on current service availability.
 6. Revoke membership and confirm that the workspace is inaccessible.
 
-## Security notes
+## 7. Security notes
 
 - Keep `APP_ENCRYPTION_KEY` stable and private.
-- The app is designed for one Render instance with a persistent disk and SQLite.
+- When `DATABASE_URL` is set, relational data is stored in Supabase PostgreSQL. Keep the Render persistent disk for per-user workspaces, OpenCode HOME directories, skills, and uploaded files. The app is designed for one Render instance.
 - Private workspaces and Unix identities are not full containers. Add per-task isolation and resource/network limits before opening arbitrary command execution to the public.
 - Timing is measured by the application. Token usage is provider-reported; if the provider omits usage, the UI says it is unavailable rather than showing a fabricated number.
 
@@ -77,3 +86,11 @@ Each subscribed user can choose Low, Medium, High, or XHigh from the chat compos
 بعد تسجيل الدخول وفتح مساحة العمل، يستطيع كل مستخدم اختيار Automatic Thinking أو تفعيل ميزانية Thinking Budget مستقلة، واختيار Long Answer Target. الميزانية التلقائية تُرسل كـ `thinking_budget: -1` في حقل توافق Google؛ أما الميزانيات اليدوية فتُمرر عبر `extra_body.google.thinking_config.thinking_budget`. يجب اختبار دعم هذا الحقل عبر بوابة الموديل المستخدمة. طول الرد المستهدف ليس حداً أدنى مضموناً.
 
 زر Skills يتيح إضافة مهارات OpenCode خاصة بالمستخدم عبر ملفات `SKILL.md`. المهارات محفوظة في مجلد HOME الخاص بالمستخدم ولا تُشارك بين الحسابات.
+
+## Troubleshooting: System Prompt and generation controls
+
+The current backend applies the saved administrator System Prompt to each upstream chat-completion request if OpenCode did not already include that exact prompt. It also applies the user's selected Thinking Budget and Long Answer Target in the internal provider proxy. Render logs include a non-sensitive `Generation controls applied` record with the detected model family, thinking mode/budget, output target, token ceiling, and whether the admin prompt was already present or injected. The log never includes prompt text or API credentials.
+
+For Gemini 2.5 Pro, the proxy sends `extra_body.google.thinking_config.thinking_budget`: `-1` for dynamic mode or the selected fixed budget. It reserves output-token headroom for thinking tokens because Gemini counts thought tokens toward the total output limit. This proves the application sent the selected values, but only a real request to the configured OdiRouter model can prove that the gateway accepted and applied them.
+
+Long Answer Target is a strong prompt preference and output ceiling, not a guaranteed minimum output count. Greetings/simple questions are intentionally kept short. For substantive coding work, the updated prompt asks the agent not to return a terse summary and to include useful implementation, files changed, and tests/results.

@@ -4,7 +4,7 @@ CodeCraft is an English-language web workspace powered by the OpenCode headless 
 
 ## Features
 
-- `server.js`: Express app, SQLite persistence, authentication, admin routes, encrypted per-user API credentials, manual subscription requests and approval, OpenCode process manager, private provider gateway, and upload/export endpoints.
+- `server.js`: Express app, Supabase PostgreSQL persistence when `DATABASE_URL` is configured (SQLite fallback for local development), authentication, admin routes, encrypted per-user API credentials, manual subscription approval, OpenCode process manager, private provider gateway, and upload/export endpoints.
 - `opencode/system-prompt.txt`: built-in default coding-agent instructions. The admin can edit the active System Prompt in `/admin`; the active value is stored on persistent disk.
 - OpenCode native tools are enabled within the user's private workspace. Hosted Exa web search and experimental LSP support are enabled. The Docker image installs language servers for common languages. Reviewer/tester/researcher subagents and bundled skills are included.
 - `Dockerfile` installs OpenCode and validates the executable and server command during image build.
@@ -14,11 +14,13 @@ CodeCraft is an English-language web workspace powered by the OpenCode headless 
 
 1. Push this directory to GitHub with `render.yaml` at the repository root.
 2. In Render, choose **New → Blueprint**, connect the repository, review `render.yaml`, then create the service. It uses Docker, a Starter service, and a persistent disk mounted at `/var/data`. Check current pricing before deploying.
-3. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use a unique administrator password.
-4. Render generates `SESSION_SECRET` and `APP_ENCRYPTION_KEY`; keep their values safe. Do not rotate `APP_ENCRYPTION_KEY` after saving encrypted user credentials unless you have a migration plan.
-5. Set `APP_URL` to the exact public service origin, for example `https://your-service.onrender.com`.
-6. Configure an AI connection in `/admin` for each user, or set all three shared fallback variables `AI_BASE_URL`, `AI_MODEL_ID`, and `AI_API_KEY`. If neither path is configured for the user, the assistant will return a clear configuration error.
-7. Open `/healthz`, sign in as the administrator, then visit `/admin`.
+3. Create a Supabase project, open **Connect**, choose the **Session pooler** for an IPv4-compatible backend, and copy the full PostgreSQL connection string.
+4. In Render → Environment, set `DATABASE_URL` to that connection string. Keep it private and never commit it. The app creates its PostgreSQL tables during startup.
+5. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use a unique administrator password.
+6. Render generates `SESSION_SECRET` and `APP_ENCRYPTION_KEY`; keep their values safe. Do not rotate `APP_ENCRYPTION_KEY` after saving encrypted user credentials unless you have a migration plan.
+7. Set `APP_URL` to the exact public service origin, for example `https://your-service.onrender.com`.
+8. Configure an AI connection in `/admin` for each user, or set all three shared fallback variables `AI_BASE_URL`, `AI_MODEL_ID`, and `AI_API_KEY`. If neither path is configured for the user, the assistant will return a clear configuration error.
+9. Open `/healthz`. It reports `database: supabase` when `DATABASE_URL` is connected; sign in as administrator and visit `/admin`.
 
 ## Manual membership approval
 
@@ -27,14 +29,15 @@ Stripe is not required. New accounts are inactive. A user can request activation
 ## Local development
 
 - Install Node.js 22+, Git, Python 3, and build tools required by `better-sqlite3`.
-- Copy `.env.example` to `.env`, fill in private values, and never commit `.env`.
+- Copy `.env.example` to `.env` and choose either a private `DATABASE_URL` to Supabase or leave it unset for local SQLite development. Never commit `.env`.
 - Run `npm install`, then `npm start`.
+- On first startup with `DATABASE_URL`, the app creates the Supabase tables. If `/var/data/codecraft.sqlite` exists and Supabase has no users yet, it imports the existing users, chat messages, and app settings once during startup.
 - The Docker build installs OpenCode. For local execution outside Docker, install the OpenCode CLI separately.
 
 ## Operations and security
 
 - Each subscriber gets a private workspace and Unix worker identity. Provider credentials stay in the web process and are injected through a loopback proxy token.
-- SQLite is stored on a persistent disk; the blueprint is designed for one Render instance. Do not scale horizontally without a managed database and worker/queue design.
+- User accounts, subscriptions, per-user AI credentials, preferences, chat history, and app settings live in Supabase PostgreSQL when `DATABASE_URL` is set. Project workspaces, OpenCode HOME directories, uploaded files, skills, and exports still live under `DATA_DIR`, so keep the Render persistent disk mounted at `/var/data`. The app is designed for one Render instance; horizontal scaling requires shared workspace storage and a worker/queue design.
 - Unix identities and directory permissions are useful boundaries but are not a complete sandbox. Before opening execution to untrusted public users, add isolated containers/VMs, CPU/memory/process limits, outbound network controls, quotas, abuse monitoring, and security review.
 - The thinking animation is only a progress indicator. Response time is measured locally. Token counts are displayed only when the connected provider reports usage; CodeCraft does not invent missing token data.
 
@@ -61,3 +64,12 @@ Each subscribed user can choose Low, Medium, High, or XHigh from the chat compos
 Each active subscriber can choose automatic thinking (Gemini 2.5 dynamic budget) or an explicit Thinking Budget, and a Long Answer Target (2k, 5k, 10k, or 20k tokens). Output targets guide the model and set a generation allowance; they are not a guaranteed minimum response length. Explicit Gemini thinking budgets are sent through the Google OpenAI-compatibility `extra_body.google.thinking_config.thinking_budget` field and require the configured API gateway to forward that field.
 
 Subscribers can also add up to 20 private OpenCode Skills using a name, description, and instructions. Skills are written to each user's isolated `~/.config/opencode/skills/<skill-id>/SKILL.md`, following OpenCode's skill discovery format, and are not shared with other users.
+
+
+## Generation controls and prompt enforcement
+
+- The administrator System Prompt is loaded from persistent app settings and injected into upstream requests if it was not already included by OpenCode.
+- Existing installations automatically migrate the known previous bundled default prompt to the new default, but any custom administrator prompt is preserved.
+- Per-user Thinking Budget is applied to Gemini 2.5 Pro through `extra_body.google.thinking_config.thinking_budget`. Automatic mode sends `-1`; fixed mode sends the chosen budget.
+- Long Answer Target is applied to the actual output-token ceiling and reinforced in system instructions for substantive tasks. It is not a guaranteed minimum response length, and simple greetings remain short.
+- Render logs show a non-sensitive `Generation controls applied` diagnostic so maintainers can see whether settings were included in the outgoing request.
