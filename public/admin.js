@@ -127,6 +127,33 @@ $('userConfigForm').addEventListener('submit', async event => {
   } catch (err) { notice(err.message, true); }
   finally { button.disabled = false; }
 });
+$('testApi').addEventListener('click', async () => {
+  if (!selectedId) return notice('Select a user first.', true);
+  const button = $('testApi');
+  button.disabled = true;
+  button.textContent = 'Testing connection and tools…';
+  try {
+    const result = await api(`/api/admin/users/${selectedId}/test-ai`, { method: 'POST', body: '{}' });
+    if (!result.ok) {
+      const detail = result.connection || {};
+      const status = detail.statusCode ? `HTTP ${detail.statusCode}` : (detail.errorCode || result.errorCode || 'connection error');
+      notice(`API test failed (${status}): ${detail.errorMessage || result.message || 'Check the saved API URL, key, and model ID.'}`, true);
+    } else if (result.toolCall && result.toolCall.ok && result.connection.textReceived) {
+      const thinking = result.thinkingProbe || {};
+      const requested = thinking.enabled ? `${thinking.level} (budget ${thinking.budgetSent})` : `provider dynamic/default (budget ${thinking.budgetSent})`;
+      const usage = result.connection.reasoningTokensReported == null ? 'provider did not report reasoning-token usage' : `${result.connection.reasoningTokensReported} reasoning tokens reported`;
+      notice(`API test passed: text HTTP ${result.connection.statusCode} in ${result.connection.latencyMs} ms; tool calling returned ${result.toolCall.toolNameReturned} in ${result.toolCall.latencyMs} ms. Thinking request sent: ${requested}; ${usage}. A successful request does not guarantee the router honored every provider-specific extension.`);
+    } else if (result.toolCall && result.toolCall.ok) {
+      const thinking = result.thinkingProbe || {};
+      notice(`Function calling passed (${result.toolCall.toolNameReturned}), but the text ping returned no visible text (finish reason: ${result.connection.finishReason || 'not reported'}). Thinking budget sent: ${thinking.budgetSent == null ? 'not reported' : thinking.budgetSent}. Check the model finish reason and provider response format.`, true);
+    } else {
+      const tool = result.toolCall || {};
+      notice(`Text API connection passed (HTTP ${result.connection.statusCode}, ${result.connection.latencyMs} ms), but tool calling did not pass (${tool.statusCode || tool.errorCode || 'no tool call returned'}). ${tool.errorMessage || 'Check this ODiRouter model route for OpenAI-compatible function calling.'}`, true);
+    }
+  } catch (err) { notice(err.message || 'API test could not be completed.', true); }
+  finally { button.disabled = false; button.textContent = 'Test connection + tools'; }
+});
+
 $('subscriptionDays').addEventListener('input', () => {
   $('activateSubscription').textContent = `Verify payment and activate for ${$('subscriptionDays').value || '…'} days`;
 });

@@ -248,7 +248,7 @@ test('startup diagnostics expose deploy identity and safe TLS/provider details w
   assert.match(server, /CodeCraft runtime identity:/);
   assert.match(server, /RENDER_GIT_COMMIT/);
   assert.match(server, /databaseTlsModeSetting/);
-  assert.match(server, /lastGenerationDiagnostic\.upstreamHost = target\.host/);
+  assert.match(server, /upstreamHost: target\.host/);
   assert.match(server, /upstreamErrorMessage/);
   assert.match(server, /modelId: transformed\.diagnostics\.modelId/);
   assert.match(read('generation-controls.js'), /      modelId,/);
@@ -444,4 +444,68 @@ test('Supabase PostgreSQL is supported as the persistent relational database wit
   assert.match(docs, /Session pooler/);
   assert.match(docs, /APP_ENCRYPTION_KEY.*exactly the same/s);
   assert.match(read('.dockerignore'), /supabase-ca\.crt/);
+});
+
+
+test('successful OpenCode responses persist and return the extracted answer variable', () => {
+  const server = read('server.js');
+  assert.match(server, /const answer = parts\.filter/);
+  assert.match(server, /insertMessage\.run\(userNow\.id, 'assistant', answer, JSON\.stringify\(metadata\)\)/);
+  assert.match(server, /res\.json\(\{ answer, toolsUsed, sessionId: userNow\.opencode_session_id, durationMs, tokenUsage \}\)/);
+  assert.doesNotMatch(server, /insertMessage\.run\(userNow\.id, 'assistant', finalText/);
+  assert.doesNotMatch(server, /res\.json\(\{ answer: finalText/);
+});
+
+
+test('AI gateway does not reference a request diagnostic ID outside its lexical scope', () => {
+  const server = read('server.js');
+  const beforeEndHandlerStart = server.indexOf("const allowedPaths = new Set");
+  const endHandlerStart = server.indexOf("req.on('end', async () =>", beforeEndHandlerStart);
+  assert.ok(beforeEndHandlerStart >= 0 && endHandlerStart > beforeEndHandlerStart);
+  assert.doesNotMatch(server.slice(beforeEndHandlerStart, endHandlerStart), /generationDiagnosticId/);
+  const handler = server.slice(endHandlerStart, server.indexOf("\n    });\n  })().catch", endHandlerStart));
+  assert.match(handler, /let generationDiagnosticId = null/);
+  assert.match(handler, /upstreamHost: target\.host/);
+  assert.match(handler, /upstreamStatusCode = upstreamRes\.statusCode/);
+  assert.match(handler, /provider_request_preparation_failed/);
+});
+
+test('admin API test verifies real text connectivity and OpenAI-compatible tool calling without exposing keys', () => {
+  const server = read('server.js');
+  const html = read('public/admin.html');
+  const js = read('public/admin.js');
+  assert.match(server, /app\.post\('\/api\/admin\/users\/:id\/test-ai', requireAuth, requireAdmin/);
+  assert.match(server, /providerJsonRequest\(config/);
+  assert.match(server, /tool_choice: \{ type: 'function', function: \{ name: 'codecraft_diagnostic' \} \}/);
+  assert.match(server, /CREDENTIAL_DECRYPTION_FAILED/);
+  assert.match(server, /redactProviderDiagnostic/);
+  assert.match(server, /thinkingSettings: userPreferencePayload\(user\)/);
+  assert.match(html, /id="testApi"/);
+  assert.match(js, /\/test-ai/);
+  assert.match(js, /tool calling did not pass/);
+  assert.doesNotMatch(server.slice(server.indexOf("app.post('/api/admin/users/:id/test-ai'"), server.indexOf("app.post('/api/admin/users/:id/subscription'")), /apiKey:\s*config\.apiKey/);
+});
+
+test('per-user API credentials and administrator System Prompt stay in the persistent database', () => {
+  const server = read('server.js');
+  assert.match(server, /ai_api_key_encrypted TEXT/);
+  assert.match(server, /encryptApiKey\(rawKey\)/);
+  assert.match(server, /UPDATE users SET is_disabled = \?, ai_base_url = \?, ai_model_id = \?, ai_api_key_encrypted = \? WHERE id = \?/);
+  assert.match(server, /INSERT INTO app_settings\(key, value, updated_at\)/);
+  assert.match(server, /ON CONFLICT\(key\) DO UPDATE SET value = excluded\.value/);
+  assert.match(server, /await setAppSetting\('system_prompt', defaultSystemPrompt\)/);
+  assert.match(server, /activeSystemPrompt = String\(\(await getAppSetting\('system_prompt'\)\) \|\| defaultSystemPrompt\)/);
+  assert.match(read('render.yaml'), /key: APP_ENCRYPTION_KEY\s+(?:sync: false|generateValue: true)/);
+});
+
+
+test('admin model probe sends the saved thinking control and checks returned reasoning usage when available', () => {
+  const server = read('server.js');
+  const route = server.slice(server.indexOf("app.post('/api/admin/users/:id/test-ai'"), server.indexOf("app.post('/api/admin/users/:id/subscription'"));
+  assert.match(route, /applyGenerationControls\(/);
+  assert.match(route, /thinkingProbe\.body\.max_tokens = 1024/);
+  assert.match(route, /tool_choice: \{ type: 'function', function: \{ name: 'codecraft_diagnostic' \} \}/);
+  assert.match(route, /budgetSent: thinkingProbe\.diagnostics\.thinkingBudget/);
+  assert.match(route, /reasoningTokensReported/);
+  assert.match(read('public/admin.js'), /Thinking request sent/);
 });

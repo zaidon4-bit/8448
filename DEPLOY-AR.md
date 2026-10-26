@@ -38,6 +38,8 @@ AI connection: choose one route.
 
 - Shared default: set `AI_BASE_URL`, `AI_MODEL_ID`, and `AI_API_KEY` together in Render.
 - Per-user credentials: sign in as admin and configure the endpoint, model ID, and key for each account at `/admin`.
+- For ODiRouter OpenAI-compatible chat completions, use Base URL `https://api.odirouter.ai/v1` (do not append `/chat/completions`). Enter the exact model ID supplied by your ODiRouter account, for example `free-gemini-2.5-pro` only if that exact route appears in the account.
+- After saving a user's configuration, use the admin-only **Test connection + tools** button. It makes two short live requests: one text completion and one forced function call, consuming some provider quota. A successful HTTP response alone does not prove tool calling works.
 
 If neither route fully configures a user's connection, their chat will report that the AI connection is not configured. Removing connector integrations does not remove the need for a valid model API connection.
 
@@ -117,3 +119,11 @@ The chat offers Low, Medium, High, and XHigh, plus an independent **Enable Think
 The admin-managed System Prompt is stored in the database and synchronized to `/var/data/admin-system-prompt.txt`; it is also enforced server-side in each outgoing model request. Built-in and personal skills use OpenCode's supported `~/.config/opencode/skills/<skill>/SKILL.md` layout. The OpenCode CLI is installed and validated during Docker image build.
 
 Admin-only live diagnostics are available at `/api/admin/diagnostics` after login. They report the Render commit SHA, OpenCode CLI version, bundled skills, active workers, database TLS mode/host and reachability, the selected model ID, outbound provider host/status/error summary, the last request's tool definitions and the latest task's actual OpenCode tool names. No API keys or prompt contents are returned. A tool-definition count greater than zero proves the schemas reached the provider gateway; `lastOpenCodeTaskDiagnostic.toolsUsed` is the end-to-end evidence that OpenCode actually executed tools. An upstream 2xx response confirms HTTP acceptance, but provider logs/behavior are still needed to prove that a gateway applied a thinking-budget extension.
+
+
+## Release r7 — ODiRouter proxy and live model checks
+The r7 patch fixes a request-scope error in the OpenAI-compatible proxy that could throw before forwarding model requests. It adds a redacted admin-only live diagnostic: `/api/admin/users/:id/test-ai` and the **Test connection + tools** button in `/admin`. This performs a text ping and a forced function call using that user's saved credentials. It does not expose the key.
+
+On Render, verify `CODECRAFT_RELEASE_ID=odirouter-opencode-proxy-scopefix-20261026-r7`, then use `/admin` to test the assigned user. If text succeeds but the forced tool call fails, the connection is valid but this model route has not demonstrated OpenAI-compatible function calling. If HTTP fails, use the reported status/error to diagnose base URL, model ID, key, rate limit, or provider route.
+
+The System Prompt is saved in the database (`app_settings`) and inserted by the server into each outgoing model request. Per-user API credentials, endpoint and model ID persist in the `users` row; API keys are encrypted with AES-256-GCM. Keep `APP_ENCRYPTION_KEY` stable. Successful login routes directly into the chat view without a full-page refresh; on workspace entry, the backend starts OpenCode and pre-creates a session asynchronously.

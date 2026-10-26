@@ -17,7 +17,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const { applyGenerationControls, ALLOWED_REASONING_LEVELS, getOpenCodeModelCapabilities, isGemini25ProModel } = require('./generation-controls');
 const { configurePostgresTls } = require('./database-tls');
 
-const CODECRAFT_RELEASE_ID = 'thinking-only-opencode-warmup-20261026-r5';
+const CODECRAFT_RELEASE_ID = 'odirouter-opencode-proxy-scopefix-20261026-r7';
 console.info(`CODECRAFT_RELEASE_ID=${CODECRAFT_RELEASE_ID}`);
 
 process.umask(0o077);
@@ -454,6 +454,70 @@ function pruneBuckets(now) {
   for (const [key, item] of proxyRate) if (now - item.start > 120_000) proxyRate.delete(key);
 }
 
+function redactProviderDiagnostic(value, apiKey = '') {
+  let text = String(value || 'Unknown provider error');
+  if (apiKey) text = text.split(apiKey).join('[redacted-key]');
+  return text
+    .replace(/Bearer\s+[^\s,;]+/ig, 'Bearer [redacted]')
+    .replace(/(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,})/g, '[redacted-key]')
+    .replace(/[\r\n\t]+/g, ' ').slice(0, 360);
+}
+
+function providerJsonRequest(config, payload, timeoutMs = 20_000) {
+  return new Promise(resolve => {
+    const startedAt = Date.now();
+    let target;
+    try { target = getProviderTarget('/v1/chat/completions', config); }
+    catch (err) {
+      return resolve({ ok: false, statusCode: null, latencyMs: Date.now() - startedAt,
+        errorCode: err && err.code || 'INVALID_PROVIDER_URL', errorMessage: redactProviderDiagnostic(err && err.message, config && config.apiKey) });
+    }
+    const body = Buffer.from(JSON.stringify(payload));
+    const transport = target.protocol === 'https:' ? https : http;
+    const request = transport.request(target, { method: 'POST', timeout: timeoutMs, headers: {
+      authorization: `Bearer ${config.apiKey}`,
+      'content-type': 'application/json',
+      'content-length': String(body.length),
+      'accept-encoding': 'identity'
+    } }, response => {
+      const chunks = [];
+      let bytes = 0;
+      response.on('data', chunk => {
+        if (bytes < 64 * 1024) {
+          const safeChunk = chunk.subarray(0, 64 * 1024 - bytes);
+          chunks.push(safeChunk); bytes += safeChunk.length;
+        }
+      });
+      response.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let data = null;
+        try { data = JSON.parse(raw); } catch {}
+        const statusCode = Number(response.statusCode || 502);
+        const error = data && data.error;
+        const errorCode = error && typeof error.code === 'string' ? error.code.slice(0, 100) : null;
+        const errorMessage = statusCode >= 400
+          ? redactProviderDiagnostic(error && (error.message || error) || raw || `Provider returned HTTP ${statusCode}.`, config.apiKey)
+          : null;
+        resolve({ ok: statusCode >= 200 && statusCode < 300, statusCode,
+          latencyMs: Date.now() - startedAt, data, errorCode, errorMessage,
+          host: target.host });
+      });
+    });
+    request.on('timeout', () => request.destroy(Object.assign(new Error('Provider request timed out.'), { code: 'ETIMEDOUT' })));
+    request.on('error', err => resolve({ ok: false, statusCode: null, latencyMs: Date.now() - startedAt,
+      errorCode: err && err.code || 'PROVIDER_TRANSPORT_ERROR',
+      errorMessage: redactProviderDiagnostic(err && err.message, config.apiKey), host: target.host }));
+    request.end(body);
+  });
+}
+
+function providerTextFromResponse(data) {
+  const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) return content.map(part => part && typeof part.text === 'string' ? part.text : '').join(' ').trim();
+  return '';
+}
+
 const proxyServer = http.createServer((req, res) => {
   (async () => {
     if (!req.url || !req.url.startsWith('/v1/')) {
@@ -507,9 +571,6 @@ const proxyServer = http.createServer((req, res) => {
     let target;
     try { target = getProviderTarget(req.url, aiConfig); }
     catch { res.writeHead(503, { 'content-type': 'application/json' }); return res.end('{"error":"service_unavailable"}'); }
-    if (generationDiagnosticId && lastGenerationDiagnostic && lastGenerationDiagnostic.id === generationDiagnosticId) {
-      lastGenerationDiagnostic.upstreamHost = target.host;
-    }
     const transport = target.protocol === 'https:' ? https : http;
     const chunks = [];
     let received = 0;
@@ -521,6 +582,7 @@ const proxyServer = http.createServer((req, res) => {
     req.on('end', async () => {
       let body = Buffer.concat(chunks);
       let generationDiagnosticId = null;
+      try {
       if (requestPath === '/v1/chat/completions') {
         try {
           const parsed = JSON.parse(body.toString('utf8'));
@@ -536,6 +598,7 @@ const proxyServer = http.createServer((req, res) => {
             userId,
             modelFamily: transformed.diagnostics.modelFamily,
             modelId: transformed.diagnostics.modelId,
+            upstreamHost: target.host,
             thinkingEnabled: transformed.diagnostics.thinkingEnabled,
             reasoningLevel: transformed.diagnostics.reasoningLevel,
             thinkingBudget: transformed.diagnostics.thinkingBudget,
@@ -625,8 +688,25 @@ const proxyServer = http.createServer((req, res) => {
         if (!res.writableEnded) res.end('{"error":"provider_unavailable"}');
       });
       upstreamReq.end(body);
+      } catch (err) {
+        const safeMessage = String(err && err.message || 'internal gateway error')
+          .replace(/Bearer\s+[^\s,;]+/ig, 'Bearer [redacted]')
+          .replace(/(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,})/g, '[redacted-key]')
+          .replace(/[\r\n\t]+/g, ' ').slice(0, 240);
+        if (generationDiagnosticId && lastGenerationDiagnostic && lastGenerationDiagnostic.id === generationDiagnosticId) {
+          lastGenerationDiagnostic.gatewayError = safeMessage;
+        }
+        console.error('AI gateway request preparation failed:', JSON.stringify({ code: err && err.code || null, message: safeMessage }));
+        if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
+        if (!res.writableEnded) res.end('{"error":"provider_request_preparation_failed"}');
+      }
     });
-  })().catch(() => {
+  })().catch(err => {
+    const safeMessage = String(err && err.message || 'internal gateway error')
+      .replace(/Bearer\s+[^\s,;]+/ig, 'Bearer [redacted]')
+      .replace(/(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,})/g, '[redacted-key]')
+      .replace(/[\r\n\t]+/g, ' ').slice(0, 240);
+    console.error('AI gateway request failed before forwarding:', JSON.stringify({ code: err && err.code || null, message: safeMessage }));
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
     if (!res.writableEnded) res.end('{"error":"internal_error"}');
   });
@@ -1145,6 +1225,86 @@ app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ users });
 });
+app.post('/api/admin/users/:id/test-ai', requireAuth, requireAdmin, async (req, res) => {
+  const userId = Number(req.params.id);
+  if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
+  const user = await selectUserById.get(userId);
+  if (!user) return res.status(404).json({ error: 'User not found.' });
+  let config;
+  try { config = getAIConfigForUser(user); } catch (err) {
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok: false, phase: 'configuration', errorCode: 'CREDENTIAL_DECRYPTION_FAILED',
+      message: 'The saved API credential could not be decrypted. Check that APP_ENCRYPTION_KEY is unchanged from when this key was saved.' });
+  }
+  if (!config || !config.baseUrl || !config.modelId || !config.apiKey) {
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok: false, phase: 'configuration', errorCode: 'AI_CONFIG_MISSING', message: 'This user has no complete API configuration. Save the API URL, model ID, and API key first.' });
+  }
+
+  // Test a real text completion while sending the same reasoning controls as
+  // normal workspace requests. A separate forced function call verifies that
+  // the provider route returns a tool-call payload instead of trusting metadata.
+  // Both requests consume some of the user's provider quota.
+  const thinkingProbe = applyGenerationControls({
+    model: config.modelId,
+    messages: [{ role: 'user', content: 'Reply with exactly OK.' }],
+    max_tokens: 1024,
+    stream: false
+  }, user, config, '');
+  // Cap this diagnostic only; applyGenerationControls otherwise uses Gemini's
+  // production output ceiling, which is unnecessary for a connection probe.
+  thinkingProbe.body.max_tokens = 1024;
+  delete thinkingProbe.body.max_completion_tokens;
+  const connection = await providerJsonRequest(config, thinkingProbe.body);
+  const text = connection.data ? providerTextFromResponse(connection.data) : '';
+  const connectionChoice = connection.data && connection.data.choices && connection.data.choices[0];
+  const connectionUsage = connection.data && connection.data.usage;
+  const reasonTokens = connectionUsage ? (
+    (connectionUsage.completion_tokens_details && connectionUsage.completion_tokens_details.reasoning_tokens)
+      ?? connectionUsage.reasoning_tokens
+      ?? (connectionUsage.completion_tokens_details && connectionUsage.completion_tokens_details.thought_tokens)
+  ) : null;
+  if (!connection.ok) {
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok: false, phase: 'connection', modelId: config.modelId,
+      connection: { ok: false, statusCode: connection.statusCode, latencyMs: connection.latencyMs,
+        errorCode: connection.errorCode || null, errorMessage: connection.errorMessage || 'Provider request failed.', host: connection.host || null },
+      toolCall: { tested: false, ok: false },
+      thinkingProbe: { modelFamily: thinkingProbe.diagnostics.modelFamily, enabled: thinkingProbe.diagnostics.thinkingEnabled, level: thinkingProbe.diagnostics.reasoningLevel, parameter: thinkingProbe.diagnostics.reasoningParameter, budgetSent: thinkingProbe.diagnostics.thinkingBudget },
+      message: 'The OpenAI-compatible text request failed. Use the HTTP status and provider message to correct the route, key, or model ID.' });
+  }
+  const toolTest = await providerJsonRequest(config, {
+    model: config.modelId,
+    messages: [{ role: 'user', content: 'Call codecraft_diagnostic with value set to "ok". Do not reply with normal text.' }],
+    tools: [{ type: 'function', function: {
+      name: 'codecraft_diagnostic', description: 'Return a diagnostic value to verify function calling.',
+      parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'], additionalProperties: false }
+    } }],
+    tool_choice: { type: 'function', function: { name: 'codecraft_diagnostic' } },
+    // Give the routed reasoning model enough room to return the forced tool call.
+    max_tokens: 2048,
+    stream: false
+  });
+  const choice = toolTest.data && toolTest.data.choices && toolTest.data.choices[0];
+  const toolCalls = choice && choice.message && Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : [];
+  const toolCallOk = Boolean(toolTest.ok && toolCalls.some(call => call && call.type === 'function' && call.function && call.function.name === 'codecraft_diagnostic'));
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    modelId: config.modelId,
+    source: config.source,
+    connection: { ok: true, statusCode: connection.statusCode, latencyMs: connection.latencyMs, textReceived: Boolean(text), finishReason: connectionChoice && connectionChoice.finish_reason || null, reasoningTokensReported: Number.isFinite(Number(reasonTokens)) ? Number(reasonTokens) : null, host: connection.host || null },
+    thinkingProbe: { modelFamily: thinkingProbe.diagnostics.modelFamily, enabled: thinkingProbe.diagnostics.thinkingEnabled, level: thinkingProbe.diagnostics.reasoningLevel, parameter: thinkingProbe.diagnostics.reasoningParameter, budgetSent: thinkingProbe.diagnostics.thinkingBudget },
+    toolCall: { tested: true, ok: toolCallOk, statusCode: toolTest.statusCode,
+      latencyMs: toolTest.latencyMs, errorCode: toolTest.errorCode || null,
+      errorMessage: toolTest.errorMessage || null, toolNameReturned: toolCallOk ? 'codecraft_diagnostic' : null },
+    thinkingSettings: userPreferencePayload(user),
+    message: toolCallOk
+      ? (text ? 'Connection and function calling both passed. Thinking controls are attached to normal Gemini 2.5 Pro task requests.' : 'HTTP connectivity and function calling passed, but the simple text ping returned no visible text. Inspect the route response format and token finish reason.')
+      : 'HTTP connection passed, but the forced function-call check did not return the requested tool. Confirm this ODiRouter model route supports OpenAI-compatible tool calling.'
+  });
+});
+
 app.post('/api/admin/users/:id/subscription', requireAuth, requireAdmin, async (req, res) => {
   const userId = Number(req.params.id);
   if (!Number.isSafeInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
@@ -1507,8 +1667,8 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
     console.info('OpenCode task completed:', JSON.stringify(resultMeta));
     const metadata = { durationMs, tokenUsage };
     await insertMessage.run(userNow.id, 'user', prompt, null);
-    await insertMessage.run(userNow.id, 'assistant', finalText, JSON.stringify(metadata));
-    res.json({ answer: finalText, toolsUsed, sessionId: userNow.opencode_session_id, durationMs, tokenUsage });
+    await insertMessage.run(userNow.id, 'assistant', answer, JSON.stringify(metadata));
+    res.json({ answer, toolsUsed, sessionId: userNow.opencode_session_id, durationMs, tokenUsage });
   } catch (err) {
     lastOpenCodeTaskDiagnostic = { at: new Date().toISOString(), userId: req.authUser.id, outcome: 'error', errorCode: err && err.code || null };
     console.error(`Coding request failed for user ${req.authUser.id}:`, err && err.message ? err.message : 'unknown error');
@@ -1650,7 +1810,7 @@ async function startServer() {
   appServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`CodeCraft web service listening on port ${PORT}`);
     console.log(`Database backend: ${db.isPostgres ? 'Supabase PostgreSQL' : 'local SQLite fallback'}`);
-    if (!aiConfigReady()) console.warn('No default AI API configured. Assign a user-specific API from /admin before testing the coding workspace.');
+    if (!aiConfigReady()) console.warn('No server-wide default AI API is configured; user-specific API credentials assigned in /admin are supported.');
     console.log('Subscription approvals are handled manually in /admin.');
   });
   proxyServer.listen(AI_PROXY_PORT, AI_PROXY_HOST, () => { proxyListening = true; console.log('Internal AI gateway listening on loopback.'); });

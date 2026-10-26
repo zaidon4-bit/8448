@@ -85,3 +85,9 @@ The app requires the Supabase root CA for verified TLS. Download the root certif
 ## Deployment diagnostics
 
 On startup the service prints a `CodeCraft runtime identity` line with the Render commit SHA and database TLS mode (no credentials). If it does not appear after redeploy, check Render's branch and Root Directory. OpenCode's runtime provider config passes the per-worker internal token and the resolved System Prompt directly; it does not rely on inline `{env:...}`/`{file:...}` placeholders.
+
+
+## ODiRouter diagnostics and r7 patch
+Recommended ODiRouter base URL: `https://api.odirouter.ai/v1`; do not include `/chat/completions` in the Base URL. Use the exact model ID shown in your account. Admins can select a user and press **Test connection + tools** to run a short text request and a forced tool-call request against the saved user API. This diagnostic uses some model quota and never returns the key.
+
+Release r7 fixes an out-of-scope diagnostic identifier in the provider proxy, clarifies upstream failure logs, and increases token ceilings in the diagnostic probe so the reasoning model has room to return visible text/tool output. Release identity: `odirouter-opencode-proxy-scopefix-20261026-r7`. Local tests do not prove a live ODiRouter route works; use the admin probe after deployment.

@@ -41,7 +41,8 @@
           <label class="field"><span>API key</span><input id="apiKey" type="password" placeholder="Enter a new key to replace the saved key" dir="ltr" autocomplete="new-password" maxlength="2000"></label>
           <p class="admin-hint">Saved keys cannot be viewed again. Leave this field empty to keep the existing key.</p>
           <label class="admin-check"><input id="isDisabled" type="checkbox"><span>Disable this account and revoke access</span></label>
-          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">Save settings</button><button id="clearApi" class="button button-quiet" type="button">Clear custom API</button></div>
+          <div class="admin-actions"><button id="saveUser" class="button button-primary" type="submit">Save settings</button><button id="testApi" class="button button-quiet" type="button">Test connection + tools</button><button id="clearApi" class="button button-quiet" type="button">Clear custom API</button></div>
+          <p class="admin-hint">The test sends two short requests to this user's configured model: a text ping and a forced tool call. It uses a small amount of API quota.</p>
           <p class="admin-hint">If no custom API is assigned, the app can use the server's default AI_BASE_URL, AI_MODEL_ID, and AI_API_KEY settings.</p>
         </form>
         <section class="subscription-admin-box" aria-labelledby="subscriptionAdminHeading">
