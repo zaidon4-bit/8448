@@ -106,26 +106,17 @@
           <input id="projectFiles" type="file" multiple webkitdirectory directory hidden>
           <div class="generation-controls" aria-label="Response settings">
             <div class="generation-control-row">
-              <label class="thinking-budget-toggle" for="thinkingBudgetEnabled"><input id="thinkingBudgetEnabled" type="checkbox"><span>Enable Thinking Budget</span></label>
-              <label class="reasoning-level-label" for="reasoningLevel">Reasoning level</label>
+              <label class="thinking-budget-toggle" for="thinkingBudgetEnabled"><input id="thinkingBudgetEnabled" type="checkbox"><span>Enable Thinking</span></label>
+              <label class="reasoning-level-label" for="reasoningLevel">Thinking level</label>
               <select id="reasoningLevel" aria-label="Reasoning level">
                 <option value="low">Low</option>
                 <option value="medium" selected>Medium</option>
                 <option value="high">High</option>
-                <option value="xhigh">XHigh</option>
-              </select>
-            </div>
-            <div class="generation-control-row">
-              <label for="longAnswerTarget">Long Answer Target</label>
-              <select id="longAnswerTarget" aria-label="Long Answer Target">
-                <option value="2000">2,000 tokens · Standard</option>
-                <option value="5000" selected>5,000 tokens · Detailed</option>
-                <option value="10000">10,000 tokens · Long</option>
-                <option value="20000">20,000 tokens · Very long</option>
+                <option value="xhigh">X-High</option>
               </select>
               <span id="preferencesSaveStatus" role="status">Default</span>
             </div>
-            <p id="generationSettingsHelp" class="generation-settings-help">When enabled, the selected reasoning level is sent to the model. When off, the model uses its default or dynamic reasoning behavior; some models still reason internally. Answer targets guide detailed responses but cannot guarantee a minimum token count. Settings are saved to your account.</p>
+            <p id="generationSettingsHelp" class="generation-settings-help">When enabled, the selected reasoning level is sent to the provider. When off, the provider uses its default or dynamic reasoning behavior. Some models still use internal thinking. Settings are saved to your account.</p>
           </div>
           <div class="composer-bottom">
             <div class="composer-left">

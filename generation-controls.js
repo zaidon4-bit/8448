@@ -1,14 +1,14 @@
+
 'use strict';
 
 const ALLOWED_REASONING_LEVELS = ['low', 'medium', 'high', 'xhigh'];
-const ALLOWED_OUTPUT_TARGETS = [2000, 5000, 10000, 20000];
 const GEMINI_25_THINKING_BUDGETS = Object.freeze({
   low: 1024,
   medium: 8192,
   high: 24576,
+  // X-High is the UI name for Gemini 2.5 Pro's maximum supported budget.
   xhigh: 32768
 });
-const GEMINI_25_MAX_THINKING_BUDGET = 32768;
 const GEMINI_25_MAX_OUTPUT_TOKENS = 65536;
 
 function messageText(content) {
@@ -21,18 +21,6 @@ function messageText(content) {
     }).join('\n');
   }
   return '';
-}
-
-function appendInstruction(message, instruction) {
-  if (typeof message.content === 'string' || message.content == null) {
-    message.content = `${String(message.content || '').trim()}\n\n${instruction}`.trim();
-    return;
-  }
-  if (Array.isArray(message.content)) {
-    message.content.push({ type: 'text', text: instruction });
-    return;
-  }
-  message.content = `${messageText(message.content)}\n\n${instruction}`.trim();
 }
 
 function addAdministratorPrompt(messages, systemPrompt) {
@@ -56,8 +44,6 @@ function isGemini25ProModel(modelId) {
 function getOpenCodeModelCapabilities(modelId) {
   const isGemini25Pro = isGemini25ProModel(modelId);
   return {
-    // OpenCode's provider migration needs these flags to preserve model
-    // tool-call and reasoning support when a custom provider is normalized.
     tool_call: true,
     reasoning: true,
     limit: {
@@ -93,58 +79,37 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
   const thinkingEnabled = !!(user && user.thinking_mode === 'budget');
   const requestedLevel = String(user && user.reasoning_level || 'medium').trim().toLowerCase();
   const reasoningLevel = ALLOWED_REASONING_LEVELS.includes(requestedLevel) ? requestedLevel : 'medium';
-  const rawTarget = Number(user && user.output_target);
-  const outputTarget = ALLOWED_OUTPUT_TARGETS.includes(rawTarget) ? rawTarget : 5000;
-
   const promptInjected = addAdministratorPrompt(parsed.messages, systemPrompt);
-  const generationInstruction = [
-    'CodeCraft response preferences for this request:',
-    `- Desired visible response target: about ${outputTarget.toLocaleString('en-US')} output tokens for substantial coding, analysis, or detailed-explanation tasks.`,
-    '- For substantial coding tasks, be complete rather than terse: implement the requested changes, include relevant code and verification details, and report changed files and actual test results.',
-    '- For greetings and simple questions, answer briefly; do not call tools unless they are genuinely needed.',
-    '- Never pad output, invent code, invent tests, or invent token usage to reach a target. A target guides the answer and is not a guaranteed minimum.'
-  ].join('\n');
-
-  let targetMessage = null;
-  for (let i = parsed.messages.length - 1; i >= 0; i--) {
-    const candidate = parsed.messages[i];
-    if (candidate && ['system', 'developer'].includes(candidate.role)) { targetMessage = candidate; break; }
-  }
-  if (!targetMessage) parsed.messages.unshift({ role: 'system', content: generationInstruction });
-  else appendInstruction(targetMessage, generationInstruction);
 
   let effectiveReasoningEffort = null;
   let thinkingBudget = null;
   let reasoningParameter = null;
-  let maxAllowed = outputTarget;
+  let maxOutputTokens = null;
 
   if (isGemini25Pro) {
-    // Gemini 2.5 uses thinking budgets, not Gemini 3's reasoning-level API.
-    // In this provider gateway, the Google-specific setting is passed through
-    // the extra_body.google.thinking_config object. The adapter's real upstream
-    // acceptance must still be verified with a live OdiRouter request.
+    // Gemini 2.5 Pro uses a thinking budget rather than a named xhigh API level.
+    // An unchecked toggle restores dynamic/default thinking; Pro still thinks internally.
     const actualThinkingBudget = thinkingEnabled ? GEMINI_25_THINKING_BUDGETS[reasoningLevel] : -1;
     thinkingBudget = actualThinkingBudget;
     setGoogleThinkingBudget(parsed, actualThinkingBudget);
     delete parsed.reasoning_effort;
     reasoningParameter = 'extra_body.google.thinking_config.thinking_budget';
-    effectiveReasoningEffort = reasoningLevel;
-    // Gemini dynamic thinking uses a default budget of up to 8,192 tokens;
-    // reserve that amount rather than unnecessarily consuming the full 32,768-token manual budget.
-    maxAllowed = Math.min(GEMINI_25_MAX_OUTPUT_TOKENS, outputTarget + (thinkingEnabled ? thinkingBudget : 8192));
+    effectiveReasoningEffort = thinkingEnabled ? reasoningLevel : null;
+    // Do not impose a user-selected short answer ceiling. Gemini's output limit includes
+    // thought tokens, and a low ceiling can yield a long wait followed by empty text.
+    delete parsed.max_completion_tokens;
+    parsed.max_tokens = GEMINI_25_MAX_OUTPUT_TOKENS;
+    maxOutputTokens = parsed.max_tokens;
   } else if (thinkingEnabled) {
-    // For non-Gemini-2.5 routes, use the OpenAI-compatible reasoning_effort
-    // extension only when the selected route is not the Google 2.5 budget API.
     effectiveReasoningEffort = reasoningLevel;
     parsed.reasoning_effort = effectiveReasoningEffort;
     reasoningParameter = 'reasoning_effort';
-    maxAllowed = outputTarget;
+    // Preserve the provider/OpenCode output limit; this app does not set response-length targets.
+    maxOutputTokens = Number.isFinite(Number(parsed.max_tokens)) ? Number(parsed.max_tokens) : null;
   } else {
     delete parsed.reasoning_effort;
+    maxOutputTokens = Number.isFinite(Number(parsed.max_tokens)) ? Number(parsed.max_tokens) : null;
   }
-
-  delete parsed.max_completion_tokens;
-  parsed.max_tokens = maxAllowed;
 
   const toolItems = Array.isArray(parsed.tools) ? parsed.tools : [];
   const toolDefinitions = toolItems.length;
@@ -165,8 +130,7 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
       thinkingBudget,
       estimatedThinkingBudget: thinkingBudget === -1 ? null : thinkingBudget,
       reasoningParameter,
-      outputTarget,
-      maxAllowed,
+      maxOutputTokens,
       toolDefinitions,
       toolNames,
       toolChoice: typeof parsed.tool_choice === 'string' ? parsed.tool_choice : (parsed.tool_choice ? 'structured' : 'unspecified'),
@@ -179,7 +143,6 @@ function applyGenerationControls(requestBody, user, aiConfig, systemPrompt) {
 
 module.exports = {
   ALLOWED_REASONING_LEVELS,
-  ALLOWED_OUTPUT_TARGETS,
   GEMINI_25_THINKING_BUDGETS,
   isGemini25ProModel,
   getOpenCodeModelCapabilities,

@@ -51,7 +51,7 @@ The `/admin` page lets the administrator edit the global System Prompt and manag
 
 ## Subscriber reasoning controls
 
-Each subscribed user can choose Low, Medium, High, or XHigh and independently enable the Thinking Budget. For Gemini 2.5 Pro, these selections map to thinking budgets of 1,024, 8,192, 24,576, and 32,768 tokens respectively. `XHigh` is this application's label for Gemini 2.5 Pro's maximum manual budget, not a Google-defined reasoning-level name. With the toggle off, the proxy asks for dynamic thinking with `thinking_budget=-1`; Gemini 2.5 Pro still reasons internally. The request's HTTP success and whether ODiRouter actually applies the provider-specific field must be checked against a real upstream request.
+Each subscribed user can choose Low, Medium, High, or X-High and independently enable the Thinking Budget. For Gemini 2.5 Pro, these selections map to thinking budgets of 1,024, 8,192, 24,576, and 32,768 tokens respectively. `XHigh` is this application's label for Gemini 2.5 Pro's maximum manual budget, not a Google-defined reasoning-level name. With the toggle off, the proxy asks for dynamic thinking with `thinking_budget=-1`; Gemini 2.5 Pro still reasons internally. The request's HTTP success and whether ODiRouter actually applies the provider-specific field must be checked against a real upstream request.
 ## Authentication flow
 
 - Account creation does not automatically sign users in. After successful registration, the UI switches to Sign In, keeps the email, clears the password field, and displays a non-error success notice.
@@ -60,7 +60,7 @@ Each subscribed user can choose Low, Medium, High, or XHigh and independently en
 
 ## User generation preferences and personal skills
 
-Each active subscriber can choose automatic thinking (Gemini 2.5 dynamic budget) or an explicit Thinking Budget, and a Long Answer Target (2k, 5k, 10k, or 20k tokens). Output targets guide the model and set a generation allowance; they are not a guaranteed minimum response length. Explicit Gemini thinking budgets are sent through the Google OpenAI-compatibility `extra_body.google.thinking_config.thinking_budget` field and require the configured API gateway to forward that field.
+Each active subscriber can switch manual thinking control on or off and choose Low, Medium, High, or X-High. For Gemini 2.5 Pro, the levels map to explicit thinking budgets (1,024; 8,192; 24,576; and 32,768 tokens); when the toggle is off the request uses Gemini's dynamic/default budget. Gemini 2.5 Pro still performs internal thinking. The app does not expose an answer-length target.
 
 Subscribers can also add up to 20 private OpenCode Skills using a name, description, and instructions. Skills are written to each user's isolated `~/.config/opencode/skills/<skill-id>/SKILL.md`, following OpenCode's skill discovery format, and are not shared with other users.
 
@@ -70,7 +70,6 @@ Subscribers can also add up to 20 private OpenCode Skills using a name, descript
 - The administrator System Prompt is loaded from persistent app settings and injected into upstream requests if it was not already included by OpenCode.
 - Existing installations automatically migrate the known previous bundled default prompt to the new default, but any custom administrator prompt is preserved.
 - Per-user Thinking Budget is applied to Gemini 2.5 Pro through `extra_body.google.thinking_config.thinking_budget`. Automatic mode sends `-1`; fixed mode sends the chosen budget.
-- Long Answer Target is applied to the actual output-token ceiling and reinforced in system instructions for substantive tasks. It is not a guaranteed minimum response length, and simple greetings remain short.
 - Render logs show a non-sensitive `Generation controls applied` diagnostic. Admin-only `/api/admin/diagnostics` reports the number/names of tool definitions sent, provider HTTP status, and the most recent OpenCode tool names actually executed; it never returns API keys or prompt contents.
 
 

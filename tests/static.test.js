@@ -49,7 +49,7 @@ test('response metrics show seconds and milliseconds plus provider-reported toke
   assert.match(app, /Tokens used:/);
   assert.match(app, /Token usage: unavailable \(provider did not report usage\)/);
   assert.match(server, /function summarizeTokenUsage/);
-  assert.match(server, /const tokenUsage = summarizeTokenUsage\(payload\.info/);
+  assert.match(server, /const tokenUsage = summarizeTokenUsage\(messageInfo\)/);
   assert.match(server, /durationMs, tokenUsage/);
   assert.match(server, /metadata_json/);
 });
@@ -200,8 +200,13 @@ test('per-user reasoning levels and the Thinking Budget toggle reach the actual 
   assert.match(html, /id="thinkingBudgetEnabled"/);
   assert.match(html, /id="reasoningLevel"/);
   assert.doesNotMatch(html, /id="thinkingBudget"/);
-  assert.match(html, /id="longAnswerTarget"/);
+  assert.doesNotMatch(html, /longAnswerTarget|Long Answer Target|20,000 tokens/);
+  assert.match(html, /Enable Thinking/);
+  assert.match(html, /option value="xhigh">X-High/);
   assert.match(client, /reasoningLevel: normalizeReasoningLevel/);
+  assert.doesNotMatch(client, /outputTarget|longAnswerTarget|normalizeOutputTarget/);
+  assert.doesNotMatch(server, /ALLOWED_OUTPUT_TARGETS|body\.outputTarget|outputTarget:/);
+  assert.doesNotMatch(controls, /Desired visible response target|outputTarget|ALLOWED_OUTPUT_TARGETS/);
   assert.match(controls, /GEMINI_25_THINKING_BUDGETS/);
   assert.match(controls, /thinking_budget: actualThinkingBudget/);
   assert.match(controls, /ALLOWED_REASONING_LEVELS = \['low', 'medium', 'high', 'xhigh'\]/);
@@ -255,7 +260,10 @@ test('OpenCode cold start is prewarmed on workspace entry and concurrent starts 
   const app = read('public/app.js');
   assert.match(server, /instanceStartPromises/);
   assert.match(server, /app\.post\('\/api\/chat\/warmup', requireAuth, requireSubscription/);
+  assert.match(server, /OpenCode workspace prewarmed/);
+  assert.match(server, /ensureOpenCodeSessionForUser/);
   assert.match(app, /request\('\/api\/chat\/warmup'/);
+  assert.match(app, /Kick off OpenCode immediately on workspace entry/);
   assert.match(read('opencode/system-prompt.txt'), /answer immediately in one short sentence/i);
   assert.match(read('opencode/system-prompt.txt'), /Do not call every tool for every request/i);
 });
@@ -297,11 +305,12 @@ test('Gemini reasoning levels map to supported thinking budgets and inject the a
       { role: 'user', content: 'Implement a feature across files.' }
     ] };
     const { body, diagnostics } = applyGenerationControls(request,
-      { thinking_mode: 'budget', reasoning_level: level, output_target: 10000 },
+      { thinking_mode: 'budget', reasoning_level: level },
       { modelId: 'free-gemini-2.5-pro' }, customPrompt);
     assert.equal(body.model, 'free-gemini-2.5-pro');
     assert.equal(body.extra_body.google.thinking_config.thinking_budget, budget);
-    assert.equal(body.max_tokens, 10000 + budget);
+    assert.equal(body.max_tokens, 65536);
+    assert.equal(diagnostics.maxOutputTokens, 65536);
     assert.equal(diagnostics.reasoningLevel, level);
     assert.equal(diagnostics.thinkingEnabled, true);
     assert.equal(diagnostics.systemPromptIncluded, true);
@@ -326,13 +335,13 @@ test('Gemini 2.5 Pro IDs are recognized and OpenCode model metadata explicitly p
 test('Thinking Budget toggle off requests dynamic Gemini reasoning without showing a numeric thinking field', () => {
   const { applyGenerationControls } = require('../generation-controls');
   const { body, diagnostics } = applyGenerationControls({ messages: [{ role: 'user', content: 'Explain a project.' }] },
-    { thinking_mode: 'auto', reasoning_level: 'high', output_target: 20000 },
+    { thinking_mode: 'auto', reasoning_level: 'high' },
     { modelId: 'free-gemini-2.5-pro' }, 'Follow the current administrator prompt.');
   assert.equal(body.extra_body.google.thinking_config.thinking_budget, -1);
-  assert.equal(body.max_tokens, 28192);
+  assert.equal(body.max_tokens, 65536);
   assert.equal(diagnostics.thinkingEnabled, false);
   assert.equal(diagnostics.thinkingBudget, -1);
-  assert.equal(diagnostics.outputTarget, 20000);
+  assert.equal(diagnostics.maxOutputTokens, 65536);
 });
 
 test('native tool definitions and tool choice are preserved for the provider; diagnostics name only safe tools', () => {
@@ -345,7 +354,7 @@ test('native tool definitions and tool choice are preserved for the provider; di
     messages: [{ role: 'user', content: 'Read package.json and run the tests.' }],
     tools,
     tool_choice: 'auto'
-  }, { thinking_mode: 'auto', reasoning_level: 'medium', output_target: 5000 },
+  }, { thinking_mode: 'auto', reasoning_level: 'medium' },
   { modelId: 'a-coding-model' }, 'Follow the workspace instructions.');
   assert.deepEqual(body.tools, tools);
   assert.equal(body.tool_choice, 'auto');
@@ -353,6 +362,8 @@ test('native tool definitions and tool choice are preserved for the provider; di
   assert.deepEqual(diagnostics.toolNames, ['read', 'bash']);
   const server = read('server.js');
   assert.match(server, /toolDefinitions: transformed\.diagnostics\.toolDefinitions/);
+  assert.match(server, /partsCount: parts\.length/);
+  assert.match(server, /outcome: 'empty-response'/);
   assert.match(server, /toolNames: transformed\.diagnostics\.toolNames/);
   assert.match(server, /lastOpenCodeTaskDiagnostic/);
   assert.match(server, /lastGenerationDiagnostic\.upstreamSucceeded/);
@@ -367,7 +378,7 @@ test('native tool definitions and tool choice are preserved for the provider; di
   assert.equal(model.limit.output, 65536);
 });
 
-test('administrator prompt is not duplicated and response target is preserved for other models', () => {
+test('administrator prompt is not duplicated and this app does not impose output targets on other models', () => {
   const { applyGenerationControls } = require('../generation-controls');
   const prompt = 'Admin instruction marker: implement, test, and report verified results.';
   const body = { messages: [
@@ -375,11 +386,13 @@ test('administrator prompt is not duplicated and response target is preserved fo
     { role: 'user', content: 'Build a program.' }
   ] };
   const { body: result, diagnostics } = applyGenerationControls(body,
-    { thinking_mode: 'auto', reasoning_level: 'medium', output_target: 5000 },
+    { thinking_mode: 'auto', reasoning_level: 'medium' },
     { modelId: 'other-model' }, prompt);
   assert.equal(diagnostics.systemPromptInjected, false);
   assert.equal(result.messages.filter(message => String(message.content || '').includes(prompt)).length, 1);
-  assert.equal(result.max_tokens, 5000);
+  assert.equal(Object.hasOwn(result, 'max_tokens'), false);
+  assert.equal(Object.hasOwn(result, 'max_completion_tokens'), false);
+  assert.equal(diagnostics.maxOutputTokens, null);
   assert.equal(Object.hasOwn(result, 'reasoning_effort'), false);
 });
 

@@ -5,7 +5,7 @@ let authMode = 'register';
 let currentUser = null;
 let config = { productName: 'CodeCraft Studio', subscriptionPriceLabel: 'Manual activation after administrator review', assistantConfigured: false, paymentsConfigured: false, manualApprovalEnabled: true };
 let busy = false;
-let currentPreferences = { thinkingEnabled: false, reasoningLevel: 'medium', outputTarget: 5000 };
+let currentPreferences = { thinkingEnabled: false, reasoningLevel: 'medium' };
 let preferencesSavePromise = Promise.resolve();
 let preferencesSaving = false;
 
@@ -197,35 +197,30 @@ function renderUser() {
   }
 }
 function normalizeReasoningLevel(value) { const level = String(value || '').toLowerCase(); return ['low', 'medium', 'high', 'xhigh'].includes(level) ? level : 'medium'; }
-function normalizeOutputTarget(value) { const n = Number(value); return [2000, 5000, 10000, 20000].includes(n) ? n : 5000; }
 function readPreferenceControls() {
   return {
     thinkingEnabled: $('thinkingBudgetEnabled').checked,
-    reasoningLevel: normalizeReasoningLevel($('reasoningLevel').value),
-    outputTarget: normalizeOutputTarget($('longAnswerTarget').value)
+    reasoningLevel: normalizeReasoningLevel($('reasoningLevel').value)
   };
 }
 function refreshThinkingBudgetEnabled() {
   $('thinkingBudgetEnabled').disabled = preferencesSaving;
   $('reasoningLevel').disabled = preferencesSaving;
-  $('longAnswerTarget').disabled = preferencesSaving;
 }
 async function loadUserPreferences() {
   try {
     const data = await request('/api/user/preferences');
     currentPreferences = {
       thinkingEnabled: Boolean(data.thinkingEnabled),
-      reasoningLevel: normalizeReasoningLevel(data.reasoningLevel),
-      outputTarget: normalizeOutputTarget(data.outputTarget)
+      reasoningLevel: normalizeReasoningLevel(data.reasoningLevel)
     };
     $('thinkingBudgetEnabled').checked = currentPreferences.thinkingEnabled;
     $('reasoningLevel').value = currentPreferences.reasoningLevel;
-    $('longAnswerTarget').value = String(currentPreferences.outputTarget);
     $('preferencesSaveStatus').textContent = 'Saved';
-    $('generationSettingsHelp').textContent = data.note || 'Enable the selected reasoning level or let the provider choose its dynamic default.';
+    $('generationSettingsHelp').textContent = data.note || 'Enable a manual thinking level or let the provider choose its dynamic default.';
   } catch (err) {
     $('preferencesSaveStatus').textContent = 'Default';
-    $('generationSettingsHelp').textContent = 'Preferences will use the defaults until the account settings can be loaded.';
+    $('generationSettingsHelp').textContent = 'Thinking settings will use defaults until account preferences load.';
   }
   refreshThinkingBudgetEnabled();
 }
@@ -240,17 +235,14 @@ async function saveUserPreferences() {
   }).then(data => {
     currentPreferences = {
       thinkingEnabled: Boolean(data.thinkingEnabled),
-      reasoningLevel: normalizeReasoningLevel(data.reasoningLevel),
-      outputTarget: normalizeOutputTarget(data.outputTarget)
+      reasoningLevel: normalizeReasoningLevel(data.reasoningLevel)
     };
     $('thinkingBudgetEnabled').checked = currentPreferences.thinkingEnabled;
     $('reasoningLevel').value = currentPreferences.reasoningLevel;
-    $('longAnswerTarget').value = String(currentPreferences.outputTarget);
     $('preferencesSaveStatus').textContent = 'Saved';
   }).catch(err => {
     $('thinkingBudgetEnabled').checked = currentPreferences.thinkingEnabled;
     $('reasoningLevel').value = currentPreferences.reasoningLevel;
-    $('longAnswerTarget').value = String(currentPreferences.outputTarget);
     $('preferencesSaveStatus').textContent = 'Save failed';
     showGlobal(err.message || 'Could not save your preferences.', true);
   }).finally(() => {
@@ -261,7 +253,6 @@ async function saveUserPreferences() {
 }
 $('thinkingBudgetEnabled').addEventListener('change', saveUserPreferences);
 $('reasoningLevel').addEventListener('change', saveUserPreferences);
-$('longAnswerTarget').addEventListener('change', saveUserPreferences);
 
 const skillsDialog = $('skillsDialog');
 function renderUserSkills(skills, maxSkills = 20) {
@@ -331,11 +322,10 @@ $('skillForm').addEventListener('submit', async event => {
 
 async function loadHistory() {
   const box = $('chatMessages');
+  // Kick off OpenCode immediately on workspace entry, in parallel with settings/history loads.
+  request('/api/chat/warmup', { method: 'POST', body: '{}' }).catch(() => {});
   await Promise.all([loadUserPreferences(), loadUserSkills()]);
   box.innerHTML = '<div id="emptyState" class="empty-state"><div class="empty-orbit"><span>⌘</span></div><h3>Your workspace is ready</h3><p>Enter a coding task or upload project files to work on in your private workspace.</p></div>';
-  // Start the worker before waiting for the history fetch, so users who pause
-  // to read old messages arrive at a warm OpenCode process.
-  request('/api/chat/warmup', { method: 'POST', body: '{}' }).catch(() => {});
   try {
     const data = await request('/api/chat/history');
     if (data.messages && data.messages.length) {

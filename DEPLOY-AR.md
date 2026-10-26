@@ -78,22 +78,21 @@ When an active subscriber opens the workspace, the app starts OpenCode in the ba
 
 ## Subscriber reasoning controls
 
-Each subscribed user can choose Low, Medium, High, or XHigh from the chat composer. The setting is saved to that user’s account and is applied by the server-side provider proxy. The official Gemini 2.5 Pro OpenAI-compatible mapping documents Low, Medium, and High; this application additionally exposes XHigh as the model maximum fixed budget (32,768 tokens). XHigh is an application-defined budget preset, not a separate Google reasoning-level name. Other providers may support different effort variants.
+Each subscribed user can enable or disable manual thinking control and choose Low, Medium, High, or X-High from the chat composer. The setting is saved to that user’s account and is applied by the server-side provider proxy. The official Gemini 2.5 Pro OpenAI-compatible mapping documents Low, Medium, and High; this application additionally exposes XHigh as the model maximum fixed budget (32,768 tokens). XHigh is an application-defined budget preset, not a separate Google reasoning-level name. Other providers may support different effort variants.
 
 
 ## إعدادات التفكير والمهارات الشخصية
 
-بعد تسجيل الدخول وفتح مساحة العمل، يستطيع كل مستخدم اختيار Automatic Thinking أو تفعيل ميزانية Thinking Budget مستقلة، واختيار Long Answer Target. الميزانية التلقائية تُرسل كـ `thinking_budget: -1` في حقل توافق Google؛ أما الميزانيات اليدوية فتُمرر عبر `extra_body.google.thinking_config.thinking_budget`. يجب اختبار دعم هذا الحقل عبر بوابة الموديل المستخدمة. طول الرد المستهدف ليس حداً أدنى مضموناً.
+عند دخول المستخدم إلى مساحة العمل، يبدأ OpenCode في الخلفية وتُنشأ جلسة العمل مسبقاً لتقليل التأخير عند أول رسالة. يمكن للمستخدم تشغيل/إيقاف التحكم اليدوي بالتفكير واختيار Low أو Medium أو High أو X-High. يمرّر Gemini 2.5 Pro ميزانيات التفكير عبر `extra_body.google.thinking_config.thinking_budget` (1,024 / 8,192 / 24,576 / 32,768)، ويستخدم الإعداد الديناميكي عند إيقاف التحكم اليدوي. لا توجد إعدادات لطول الإجابة في واجهة المستخدم.
 
 زر Skills يتيح إضافة مهارات OpenCode خاصة بالمستخدم عبر ملفات `SKILL.md`. المهارات محفوظة في مجلد HOME الخاص بالمستخدم ولا تُشارك بين الحسابات.
 
 ## Troubleshooting: System Prompt and generation controls
 
-The current backend applies the saved administrator System Prompt to each upstream chat-completion request if OpenCode did not already include that exact prompt. It also applies the user's selected Thinking Budget and Long Answer Target in the internal provider proxy. Render logs include a non-sensitive `Generation controls applied` record with the detected model family, thinking mode/budget, output target, token ceiling, and whether the admin prompt was already present or injected. The log never includes prompt text or API credentials.
+The current backend applies the saved administrator System Prompt to each upstream chat-completion request if OpenCode did not already include that exact prompt. It applies only the user-selected thinking toggle/level in the internal provider proxy. For Gemini 2.5 Pro, the proxy allows the model output ceiling up to 65,536 tokens so thought generation is less likely to consume the full response allowance. Render logs include a non-sensitive `Generation controls applied` record with model family, thinking mode/budget, output ceiling, tools, and prompt-injection status without logging prompt text or API credentials.
 
-For Gemini 2.5 Pro, the proxy sends `extra_body.google.thinking_config.thinking_budget`: `-1` for dynamic mode or the selected fixed budget. It reserves output-token headroom for thinking tokens because Gemini counts thought tokens toward the total output limit. This proves the application sent the selected values, but only a real request to the configured OdiRouter model can prove that the gateway accepted and applied them.
+For Gemini 2.5 Pro, the proxy sends `extra_body.google.thinking_config.thinking_budget`: `-1` for dynamic mode or the selected fixed budget. The 65,536-token output ceiling is the documented Gemini 2.5 Pro maximum. This proves the application sent the selected values, but only a real request to the configured OdiRouter model can prove that the gateway accepted and applied them.
 
-Long Answer Target is a strong prompt preference and output ceiling, not a guaranteed minimum output count. Greetings/simple questions are intentionally kept short. For substantive coding work, the updated prompt asks the agent not to return a terse summary and to include useful implementation, files changed, and tests/results.
 
 
 ## Fix for `self-signed certificate in certificate chain` (Supabase)

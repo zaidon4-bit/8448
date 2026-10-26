@@ -14,10 +14,10 @@ const net = require('node:net');
 const http = require('node:http');
 const https = require('node:https');
 const { spawn, spawnSync } = require('node:child_process');
-const { applyGenerationControls, ALLOWED_REASONING_LEVELS, ALLOWED_OUTPUT_TARGETS, getOpenCodeModelCapabilities, isGemini25ProModel } = require('./generation-controls');
+const { applyGenerationControls, ALLOWED_REASONING_LEVELS, getOpenCodeModelCapabilities, isGemini25ProModel } = require('./generation-controls');
 const { configurePostgresTls } = require('./database-tls');
 
-const CODECRAFT_RELEASE_ID = 'tls-opencode-gemini-20261026-r4';
+const CODECRAFT_RELEASE_ID = 'thinking-only-opencode-warmup-20261026-r5';
 console.info(`CODECRAFT_RELEASE_ID=${CODECRAFT_RELEASE_ID}`);
 
 process.umask(0o077);
@@ -356,6 +356,7 @@ const proxyTokens = new Map();
 const proxyRate = new Map();
 const instances = new Map();
 const instanceStartPromises = new Map();
+const sessionStartPromises = new Map();
 let lastGenerationDiagnostic = null;
 let lastOpenCodeTaskDiagnostic = null;
 let lastOpenCodeWorkerConfigDiagnostic = null;
@@ -539,8 +540,7 @@ const proxyServer = http.createServer((req, res) => {
             reasoningLevel: transformed.diagnostics.reasoningLevel,
             thinkingBudget: transformed.diagnostics.thinkingBudget,
             reasoningParameter: transformed.diagnostics.reasoningParameter,
-            outputTarget: transformed.diagnostics.outputTarget,
-            maxAllowed: transformed.diagnostics.maxAllowed,
+            maxOutputTokens: transformed.diagnostics.maxOutputTokens,
             toolDefinitions: transformed.diagnostics.toolDefinitions,
             toolNames: transformed.diagnostics.toolNames,
             toolChoice: transformed.diagnostics.toolChoice,
@@ -783,6 +783,29 @@ async function ensureOpenCodeForUser(user) {
   instanceStartPromises.set(user.id, promise);
   try { return await promise; }
   finally { if (instanceStartPromises.get(user.id) === promise) instanceStartPromises.delete(user.id); }
+}
+
+async function ensureOpenCodeSessionForUser(user, instance, title = 'CodeCraft workspace') {
+  const existingId = String(user && user.opencode_session_id || '').trim();
+  if (existingId) return existingId;
+  const inFlight = sessionStartPromises.get(user.id);
+  if (inFlight) return inFlight;
+  const promise = (async () => {
+    const freshUser = await selectUserById.get(user.id);
+    if (freshUser && freshUser.opencode_session_id) return freshUser.opencode_session_id;
+    const created = await openCodeFetch(instance, '/session', {
+      method: 'POST',
+      body: JSON.stringify({ title: String(title || 'CodeCraft workspace').slice(0, 90) })
+    });
+    if (!created.ok) throw new Error(`OpenCode session creation failed (${created.status})`);
+    const session = await created.json();
+    if (!session || typeof session.id !== 'string' || !session.id) throw new Error('OpenCode returned an invalid session response');
+    await db.prepare('UPDATE users SET opencode_session_id = ? WHERE id = ?').run(session.id, user.id);
+    return session.id;
+  })();
+  sessionStartPromises.set(user.id, promise);
+  try { return await promise; }
+  finally { if (sessionStartPromises.get(user.id) === promise) sessionStartPromises.delete(user.id); }
 }
 async function startOpenCodeForUser(user) {
   if (!aiConfigReady(user)) throw new Error('AI service is not configured for this account');
@@ -1256,10 +1279,8 @@ function userPreferencePayload(user) {
   return {
     thinkingEnabled: !!(user && user.thinking_mode === 'budget'),
     reasoningLevel: ALLOWED_REASONING_LEVELS.includes(requestedLevel) ? requestedLevel : 'medium',
-    outputTarget: ALLOWED_OUTPUT_TARGETS.includes(Number(user && user.output_target)) ? Number(user.output_target) : 5000,
     reasoningLevels: ALLOWED_REASONING_LEVELS,
-    outputTargets: ALLOWED_OUTPUT_TARGETS,
-    note: 'When enabled, the selected reasoning level is sent to the provider request. When disabled, the model uses its default or dynamic reasoning behavior; some models still reason internally. Output targets guide detailed answers but cannot guarantee a minimum token count.'
+    note: 'When enabled, the selected thinking level is sent to the provider. When disabled, provider-default or dynamic thinking is used. Gemini 2.5 Pro cannot fully disable its internal thinking.'
   };
 }
 app.get('/api/user/preferences', requireAuth, requireSubscription, async (req, res) => {
@@ -1280,13 +1301,9 @@ app.patch('/api/user/preferences', requireAuth, requireSubscription, async (req,
   const reasoningLevel = body.reasoningLevel === undefined
     ? (ALLOWED_REASONING_LEVELS.includes(String(user && user.reasoning_level || '').toLowerCase()) ? String(user.reasoning_level).toLowerCase() : 'medium')
     : String(body.reasoningLevel).trim().toLowerCase();
-  const outputTarget = body.outputTarget === undefined
-    ? (ALLOWED_OUTPUT_TARGETS.includes(Number(user && user.output_target)) ? Number(user.output_target) : 5000)
-    : Number(body.outputTarget);
-  if (!ALLOWED_REASONING_LEVELS.includes(reasoningLevel)) return res.status(400).json({ error: 'Choose Low, Medium, High, or XHigh reasoning.' });
-  if (!ALLOWED_OUTPUT_TARGETS.includes(outputTarget)) return res.status(400).json({ error: 'Choose a supported long-answer target.' });
-  await db.prepare('UPDATE users SET thinking_mode = ?, reasoning_level = ?, output_target = ? WHERE id = ?')
-    .run(thinkingEnabled ? 'budget' : 'auto', reasoningLevel, outputTarget, req.authUser.id);
+  if (!ALLOWED_REASONING_LEVELS.includes(reasoningLevel)) return res.status(400).json({ error: 'Choose Low, Medium, High, or X-High reasoning.' });
+  await db.prepare('UPDATE users SET thinking_mode = ?, reasoning_level = ? WHERE id = ?')
+    .run(thinkingEnabled ? 'budget' : 'auto', reasoningLevel, req.authUser.id);
   const updated = await selectUserById.get(req.authUser.id);
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, ...userPreferencePayload(updated) });
@@ -1427,11 +1444,14 @@ app.get('/api/chat/history', requireAuth, requireSubscription, async (req, res) 
 app.post('/api/chat/warmup', requireAuth, requireSubscription, async (req, res) => {
   const user = await selectUserById.get(req.authUser.id);
   if (!aiConfigReady(user)) return res.status(503).json({ error: 'AI connection is not configured for this account.' });
-  // Start OpenCode in the background while the user is viewing the workspace,
-  // rather than charging its cold-start time to the first chat response.
-  ensureOpenCodeForUser(user).catch(err => {
-    console.warn(`OpenCode warm-up did not complete for user ${user.id}: ${String(err.message || err)}`);
-  });
+  // Start the isolated OpenCode worker and pre-create its session as soon as
+  // the user enters the workspace. Keep this off the page-load critical path.
+  ensureOpenCodeForUser(user)
+    .then(instance => ensureOpenCodeSessionForUser(user, instance))
+    .then(sessionId => console.info('OpenCode workspace prewarmed:', JSON.stringify({ userId: user.id, sessionReady: Boolean(sessionId) })))
+    .catch(err => {
+      console.warn(`OpenCode warm-up did not complete for user ${user.id}: ${String(err.message || err)}`);
+    });
   res.status(202).json({ ok: true, status: 'warming' });
 });
 
@@ -1446,13 +1466,7 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
     if (!isActiveSubscription(userNow)) return res.status(402).json({ error: 'Your subscription has expired or needs renewal.' });
     const instance = await ensureOpenCodeForUser(userNow);
     instance.busy = true;
-    if (!userNow.opencode_session_id) {
-      const create = await openCodeFetch(instance, '/session', { method: 'POST', body: JSON.stringify({ title: prompt.slice(0, 90) }) });
-      if (!create.ok) throw new Error(`OpenCode session creation failed (${create.status})`);
-      const session = await create.json();
-      await db.prepare('UPDATE users SET opencode_session_id = ? WHERE id = ?').run(session.id, userNow.id);
-      userNow.opencode_session_id = session.id;
-    }
+    userNow.opencode_session_id = await ensureOpenCodeSessionForUser(userNow, instance, prompt.slice(0, 90));
     const url = `/session/${encodeURIComponent(userNow.opencode_session_id)}/message`;
     const response = await openCodeFetch(instance, url, {
       method: 'POST',
@@ -1465,14 +1479,32 @@ app.post('/api/chat', requireAuth, requireSubscription, chatLimiter, async (req,
       throw new Error(`OpenCode request failed (${response.status})`);
     }
     const payload = await response.json();
-    const parts = Array.isArray(payload.parts) ? payload.parts : [];
-    const answer = parts.filter(part => part && part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n\n').trim();
-    const finalText = answer || 'The task finished without a text response. Check the workspace files or try a more specific prompt.';
-    const toolsUsed = [...new Set(parts.filter(part => part && (part.type === 'tool' || part.type === 'tool-invocation') && typeof (part.tool || part.name) === 'string').map(part => part.tool || part.name))].filter(name => /^[A-Za-z0-9_.:-]{1,80}$/.test(name)).slice(0, 40);
+    const messagePayload = payload && payload.message && typeof payload.message === 'object' ? payload.message : payload;
+    const parts = Array.isArray(payload.parts) ? payload.parts
+      : Array.isArray(messagePayload.parts) ? messagePayload.parts
+      : Array.isArray(payload.output && payload.output.parts) ? payload.output.parts : [];
+    const answer = parts.filter(part => part && part.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n\n').trim()
+      || (typeof payload.output_text === 'string' ? payload.output_text.trim() : '')
+      || (typeof messagePayload.content === 'string' ? messagePayload.content.trim() : '');
+    const toolsUsed = [...new Set(parts.filter(part => part && (part.type === 'tool' || part.type === 'tool-invocation' || part.type === 'tool-call') && typeof (part.tool || part.name || part.toolName) === 'string').map(part => part.tool || part.name || part.toolName))].filter(name => /^[A-Za-z0-9_.:-]{1,80}$/.test(name)).slice(0, 40);
     const durationMs = Date.now() - requestStartedAt;
-    lastOpenCodeTaskDiagnostic = { at: new Date().toISOString(), userId: userNow.id, outcome: 'success', durationMs, toolCount: toolsUsed.length, toolsUsed };
-    console.info('OpenCode task completed:', JSON.stringify({ userId: userNow.id, durationMs, toolCount: toolsUsed.length, toolsUsed }));
-    const tokenUsage = summarizeTokenUsage(payload.info || payload.message && payload.message.info || {});
+    const messageInfo = payload.info || messagePayload.info || {};
+    const tokenUsage = summarizeTokenUsage(messageInfo);
+    const resultMeta = {
+      userId: userNow.id, durationMs, toolCount: toolsUsed.length, toolsUsed,
+      partsCount: parts.length, partTypes: [...new Set(parts.map(part => String(part && part.type || 'unknown')))].slice(0, 12),
+      finishReason: messageInfo.finish && (messageInfo.finish.reason || messageInfo.finish) || messageInfo.finishReason || null,
+      hasText: Boolean(answer), tokenUsageAvailable: Boolean(tokenUsage)
+    };
+    if (!answer) {
+      lastOpenCodeTaskDiagnostic = { at: new Date().toISOString(), outcome: 'empty-response', ...resultMeta };
+      console.warn('OpenCode returned no final text:', JSON.stringify(resultMeta));
+      return res.status(502).json({ error: toolsUsed.length
+        ? 'OpenCode used tools but the provider did not return a final text answer. Retry with Thinking off or Low; if it repeats, check the provider response diagnostics.'
+        : 'The provider returned no final text. Retry with Thinking off or Low; if this repeats, check the OdiRouter model route and response diagnostics.' });
+    }
+    lastOpenCodeTaskDiagnostic = { at: new Date().toISOString(), outcome: 'success', ...resultMeta };
+    console.info('OpenCode task completed:', JSON.stringify(resultMeta));
     const metadata = { durationMs, tokenUsage };
     await insertMessage.run(userNow.id, 'user', prompt, null);
     await insertMessage.run(userNow.id, 'assistant', finalText, JSON.stringify(metadata));
