@@ -89,11 +89,11 @@ function App() {
       if (data.pendingApproval) {
         setPendingApproval(data.pendingApproval);
         const partial = data.partialReply || "The agent requested an action that needs your approval.";
-        setMessages([...next, { role: "assistant", content: partial, model: data.model, usage: data.usage, toolEvents: data.toolEvents || [] }]);
-        setLastMeta({ elapsedMs: data.elapsedMs, usage: data.usage, model: data.model, appliedSettings: data.appliedSettings, toolEvents: data.toolEvents || [] });
+        setMessages([...next, { role: "assistant", content: partial, model: data.model, usage: data.usage, thinkingVerification: data.thinkingVerification, appliedSettings: data.appliedSettings, modelCalls: data.modelCalls || [], toolEvents: data.toolEvents || [] }]);
+        setLastMeta({ elapsedMs: data.elapsedMs, usage: data.usage, model: data.model, appliedSettings: data.appliedSettings, thinkingVerification: data.thinkingVerification, modelCalls: data.modelCalls || [], toolEvents: data.toolEvents || [] });
       } else {
-        setMessages([...next, { role: "assistant", content: data.reply || "(Empty response)", model: data.model, usage: data.usage, toolEvents: data.toolEvents || [] }]);
-        setLastMeta({ elapsedMs: data.elapsedMs, usage: data.usage, model: data.model, appliedSettings: data.appliedSettings, toolEvents: data.toolEvents || [] });
+        setMessages([...next, { role: "assistant", content: data.reply || "(Empty response)", model: data.model, usage: data.usage, thinkingVerification: data.thinkingVerification, appliedSettings: data.appliedSettings, modelCalls: data.modelCalls || [], toolEvents: data.toolEvents || [] }]);
+        setLastMeta({ elapsedMs: data.elapsedMs, usage: data.usage, model: data.model, appliedSettings: data.appliedSettings, thinkingVerification: data.thinkingVerification, modelCalls: data.modelCalls || [], toolEvents: data.toolEvents || [] });
       }
     } catch (err) { setError(err.message || "Something went wrong."); }
     finally { setBusy(false); }
@@ -110,8 +110,8 @@ function App() {
         setPendingApproval(data.pendingApproval);
       } else {
         setPendingApproval(null);
-        setMessages(current => [...current, { role: "assistant", content: data.reply || (approve ? "Approved action completed." : "Action rejected. I will continue without it."), model: data.model, usage: data.usage, toolEvents: data.toolEvents || [] }]);
-        setLastMeta({ elapsedMs: data.elapsedMs, usage: data.usage, model: data.model, appliedSettings: data.appliedSettings, toolEvents: data.toolEvents || [] });
+        setMessages(current => [...current, { role: "assistant", content: data.reply || (approve ? "Approved action completed." : "Action rejected. I will continue without it."), model: data.model, usage: data.usage, thinkingVerification: data.thinkingVerification, appliedSettings: data.appliedSettings, modelCalls: data.modelCalls || [], toolEvents: data.toolEvents || [] }]);
+        setLastMeta({ elapsedMs: data.elapsedMs, usage: data.usage, model: data.model, appliedSettings: data.appliedSettings, thinkingVerification: data.thinkingVerification, modelCalls: data.modelCalls || [], toolEvents: data.toolEvents || [] });
       }
     } catch (err) { setError(err.message || "Could not continue the agent request."); }
     finally { setBusy(false); }
@@ -173,6 +173,39 @@ function ThinkingControls({ settings, setSettings, compact = false }) {
   </div>;
 }
 
+function thinkingStatusClass(status) {
+  if (status === "verified") return "passed";
+  if (status === "not_configured") return "not_configured";
+  return "warning";
+}
+
+function ThinkingVerification({ verification, modelCalls = [] }) {
+  if (!verification) return null;
+  const statusClass = thinkingStatusClass(verification.status);
+  const budget = verification.requestedBudgetTokens;
+  const actual = verification.actualThinkingTokens;
+  const level = verification.selectedLevel ? verification.selectedLevel.toUpperCase() : "UNKNOWN";
+  return <section className={`thinking-verification ${verification.status}`}>
+    <div className="thinking-verification-head"><span className={`tool-result-status ${statusClass}`}>{verification.status === "verified" ? "THINKING USAGE REPORTED" : verification.status === "not_configured" ? "NOT CONFIGURED" : "UNVERIFIED"}</span><strong>Thinking evidence</strong></div>
+    <div className="thinking-verification-stats">
+      <span>Selected level: <b>{level}</b></span>
+      <span>Requested budget: <b>{budget != null ? `${Number(budget).toLocaleString()} tokens` : "Not specified"}</b></span>
+      <span>Reported thinking: <b>{actual != null ? `${Number(actual).toLocaleString()} tokens` : "Not reported"}</b></span>
+      <span>Parameter in request payload: <b>{verification.parameterPath || "Not configured"}{verification.parameterValue != null ? ` = ${verification.parameterValue}` : ""}</b></span>
+      <span>Evidence field: <b>{verification.evidenceSource || "Not reported"}</b></span>
+      <span>Provider-confirmed level: <b>Not supplied</b></span>
+    </div>
+    <p>{verification.message}</p>
+    {modelCalls.length > 1 && <details className="thinking-call-details"><summary>Model call evidence ({modelCalls.length} calls in this turn)</summary>
+      {modelCalls.map((call, index) => <div className="thinking-call-row" key={`${call.model || "model"}-${index}`}>
+        <b>Call {index + 1}</b><span>{call.appliedSettings?.thinkingLevel?.toUpperCase() || "UNKNOWN"}</span>
+        <span>{call.thinkingVerification?.actualThinkingTokens != null ? `${Number(call.thinkingVerification.actualThinkingTokens).toLocaleString()} thinking tokens` : "Thinking usage not reported"}</span>
+        <span>{call.thinkingVerification?.status === "verified" ? "Thinking usage reported" : call.thinkingVerification?.status === "not_configured" ? "Not configured" : "Unverified"}</span>
+      </div>)}
+    </details>}
+  </section>;
+}
+
 function ChatPage({ messages, draft, setDraft, busy, error, endRef, sendMessage, health, settings, setSettings, lastMeta, pendingApproval, onAgentDecision }) {
   return <>
     <section className="conversation">
@@ -182,9 +215,9 @@ function ChatPage({ messages, draft, setDraft, busy, error, endRef, sendMessage,
         <div className="suggestions">{["Explain a tricky bug","Plan a full-stack web app","Review this code for risks"].map(item => <button key={item} onClick={() => setDraft(item)}>{item}<span>↗</span></button>)}</div>
         {!health?.aiConfigured && <p className="setup-hint">Configure the server-side provider environment variables to enable AI replies.</p>}
         <div className="quick-thinking"><span className="eyebrow">CURRENT THINKING</span><div className="mini-segment">{[["low","Low"],["medium","Medium"],["high","High"],["xhigh","X High"]].map(([id,label]) => <button key={id} className={settings.thinkingLevel===id?"chosen":""} onClick={() => setSettings(s=>({...s,thinkingLevel:id}))}>{label}</button>)}</div><button className="text-link" onClick={() => document.getElementById("thinking-drawer")?.classList.toggle("open")}>Thinking & response options ↗</button><div id="thinking-drawer" className="inline-drawer"><ThinkingControls settings={settings} setSettings={setSettings} compact /></div></div>
-      </div> : <div className="messages">{messages.map((m,i)=><article key={i} className={`message ${m.role}`}><div className="avatar">{m.role==="user"?"Y":"✳"}</div><div className="message-body"><div className="message-label">{m.role==="user"?"YOU":"CODECRAFT AI"}</div><div className="message-content">{m.content}</div>{m.role==="assistant"&&m.toolEvents?.length>0&&<div className="tool-trace"><div className="tool-trace-title">TOOLS USED IN THIS TURN</div>{m.toolEvents.map((event,j)=><div className="tool-trace-row" key={`${event.name}-${j}`}><span className={`tool-result-status ${event.status}`}>{event.status.replace(/_/g," ").toUpperCase()}</span><strong>{event.name}</strong><span>{event.detail}</span></div>)}</div>}{m.usage?.total_tokens!=null&&<div className="message-meta">{m.usage.total_tokens.toLocaleString()} tokens · {m.model||"AI model"}</div>}</div></article>)}{busy&&<article className="message assistant"><div className="avatar">✳</div><div className="message-body"><div className="message-label">CODECRAFT AI</div><div className="thinking"><i></i><i></i><i></i><span>Working · {settings.thinkingLevel.toUpperCase()}</span></div></div></article>}{pendingApproval&&<ApprovalPanel pending={pendingApproval} busy={busy} onDecision={onAgentDecision}/>}<div ref={endRef}/></div>}
+      </div> : <div className="messages">{messages.map((m,i)=><article key={i} className={`message ${m.role}`}><div className="avatar">{m.role==="user"?"Y":"✳"}</div><div className="message-body"><div className="message-label">{m.role==="user"?"YOU":"CODECRAFT AI"}</div><div className="message-content">{m.content}</div>{m.role==="assistant"&&<ThinkingVerification verification={m.thinkingVerification} modelCalls={m.modelCalls || []}/>}{m.role==="assistant"&&m.toolEvents?.length>0&&<div className="tool-trace"><div className="tool-trace-title">TOOLS USED IN THIS TURN</div>{m.toolEvents.map((event,j)=><div className="tool-trace-row" key={`${event.name}-${j}`}><span className={`tool-result-status ${event.status}`}>{event.status.replace(/_/g," ").toUpperCase()}</span><strong>{event.name}</strong><span>{event.detail}</span></div>)}</div>}{m.usage?.total_tokens!=null&&<div className="message-meta">{m.usage.total_tokens.toLocaleString()} total tokens · {m.model||"AI model"}{m.usage?.thinking_tokens!=null?` · ${Number(m.usage.thinking_tokens).toLocaleString()} thinking tokens`:""}</div>}</div></article>)}{busy&&<article className="message assistant"><div className="avatar">✳</div><div className="message-body"><div className="message-label">CODECRAFT AI</div><div className="thinking"><i></i><i></i><i></i><span>Working · {settings.thinkingLevel.toUpperCase()}</span></div></div></article>}{pendingApproval&&<ApprovalPanel pending={pendingApproval} busy={busy} onDecision={onAgentDecision}/>}<div ref={endRef}/></div>}
     </section>
-    <div className="composer-wrap">{error&&<div className="error-message">{error}</div>}{lastMeta&&<div className="request-meta"><span>{lastMeta.elapsedMs} ms</span><span>{lastMeta.usage?.total_tokens != null ? `${lastMeta.usage.total_tokens.toLocaleString()} tokens` : "Token usage not returned"}</span><span>{lastMeta.model}</span><span>{settings.thinkingLevel.toUpperCase()} · {settings.additionalMode}</span>{lastMeta.appliedSettings&&<span>{lastMeta.appliedSettings.reasoningParameterApplied?`Reasoning parameter sent: ${lastMeta.appliedSettings.thinkingField||"thinking budget"}${lastMeta.appliedSettings.thinkingValue?`=${lastMeta.appliedSettings.thinkingValue}`:""}`:"Provider reasoning parameter not sent"}</span>}{lastMeta.appliedSettings?.deepBudgetTokensRequested&&<span>Thinking budget requested: {Number(lastMeta.appliedSettings.deepBudgetTokensRequested).toLocaleString()}</span>}</div>}
+    <div className="composer-wrap">{error&&<div className="error-message">{error}</div>}{lastMeta&&<div className="request-meta"><span>{lastMeta.elapsedMs} ms</span><span>{lastMeta.usage?.total_tokens != null ? `${lastMeta.usage.total_tokens.toLocaleString()} total tokens` : "Total usage not returned"}</span>{lastMeta.usage?.thinking_tokens!=null&&<span>{Number(lastMeta.usage.thinking_tokens).toLocaleString()} thinking tokens reported</span>}<span>{lastMeta.model}</span><span>{(lastMeta.appliedSettings?.thinkingLevel || settings.thinkingLevel).toUpperCase()} · {lastMeta.appliedSettings?.additionalMode || settings.additionalMode}</span>{lastMeta.thinkingVerification&&<span>Thinking usage: {lastMeta.thinkingVerification.status === "verified" ? "TOKENS REPORTED" : lastMeta.thinkingVerification.status.toUpperCase()}</span>}{lastMeta.appliedSettings&&<span>{lastMeta.appliedSettings.reasoningParameterApplied?`Parameter included: ${lastMeta.appliedSettings.thinkingField||lastMeta.appliedSettings.deepBudgetField||"thinking budget"}${lastMeta.appliedSettings.thinkingValue!=null?`=${lastMeta.appliedSettings.thinkingValue}`:""}`:"No thinking parameter configured"}</span>}{(lastMeta.appliedSettings?.thinkingBudgetTokensRequested || lastMeta.appliedSettings?.deepBudgetTokensRequested)&&<span>Requested budget: {Number(lastMeta.appliedSettings.thinkingBudgetTokensRequested || lastMeta.appliedSettings.deepBudgetTokensRequested).toLocaleString()} tokens</span>}</div>}
       <form className="composer" onSubmit={sendMessage}><textarea value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage(e);}}} placeholder="Ask CodeCraft anything about code..." rows="1" disabled={busy||!!pendingApproval}/><div className="composer-footer"><span>Enter to send · Shift + Enter for a new line</span><button className="send-button" type="submit" disabled={busy||!!pendingApproval||!draft.trim()} aria-label="Send message">↑</button></div></form><p className="disclaimer">AI can make mistakes. Review code and tool output before using them.</p>
     </div>
   </>;
