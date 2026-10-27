@@ -1,93 +1,82 @@
-# CodeCraft Studio — OpenCode Coding Workspace
+# CodeCraft AI — multi-user admin starter
 
-CodeCraft is an English-language web workspace powered by the OpenCode headless server. It includes account registration/login, an admin dashboard, encrypted per-user API settings, manual membership approval, private workspaces, project upload/download, a persistent coding prompt, a compact animated thinking indicator, response timing, and provider-reported token usage.
+An independent web-based coding assistant starter. It includes a React/Vite UI, Express API, tool-calling agent, per-user workspaces, cookie-based accounts, admin-managed per-user API configurations, model-specific system prompts, and token usage metering.
 
-## Features
+## What is implemented
 
-- `server.js`: Express app, Supabase PostgreSQL persistence when `DATABASE_URL` is configured (SQLite fallback for local development), authentication, admin routes, encrypted per-user API credentials, manual subscription approval, OpenCode process manager, private provider gateway, and upload/export endpoints.
-- `opencode/system-prompt.txt`: built-in default coding-agent instructions. The admin can edit the active System Prompt in `/admin`; the active value is stored on persistent disk.
-- OpenCode native tools are enabled within the user's private workspace. Hosted Exa web search and experimental LSP support are enabled. The Docker image installs language servers for common languages. Reviewer/tester/researcher subagents and bundled skills are included. No custom MCP server is configured in this release.
-- `Dockerfile` installs OpenCode and validates the executable and server command during image build.
-- English-only responsive UI, user messages aligned right, assistant messages aligned left, transparent compact thinking cube, elapsed time shown in seconds and milliseconds, and provider-reported token usage when available. OpenCode pre-warms when a subscribed user enters the workspace to reduce first-message cold start. The default prompt asks for concise fast answers and avoids tool calls for greetings.
+- Email/password login with scrypt password hashes and opaque HTTP-only sessions stored by hash.
+- Admin bootstrap from environment variables on the first launch.
+- Admin page to create/disable customer accounts, assign per-user HTTPS API endpoints, model IDs and API keys, set monthly token allowances, and inspect usage events.
+- Per-user API keys encrypted at rest with AES-256-GCM. Keys are never returned to the UI after saving.
+- Administrator-configurable system prompt for each model ID, plus `*` as the fallback prompt.
+- The model-specific system prompt is injected server-side into both chat and agent calls.
+- Each user has a distinct workspace and data directory for task/session/file history and pending tool approvals.
+- Usage token metering and monthly token quota checks.
+- Low / Medium / High / X High reasoning-effort controls, separate from Standard / Quick / Long / Deep response modes. The selected value is sent to the provider only when a supported/configured field mapping exists.
+- Automatic request mapping for ODiRouter Gemini 2.5 Pro: `reasoning_effort` for Low / Medium / High; X High maps to the documented High ceiling. Deep mode requests a 10,000 thinking budget; Long mode requests an output-token maximum of 10,000 (not a minimum).
+- Read/search workspace tools, a safe no-execution JavaScript/JSON syntax checker, approval-gated file writes/deletes/task creation/commands, sessions, tasks, rules and skills.
+- Chat activity trace showing which tools were actually called and their result status.
+- Settings → Tools & reasoning diagnostics: safe local workspace tests plus optional live provider tests for chat, function/tool calling, Low / Medium / High / X High, Deep and Long mode.
 
-## Deploy to Render
+## Install locally (Termux or desktop)
 
-1. Push this directory to GitHub with `render.yaml` at the repository root.
-2. In Render, choose **New → Blueprint**, connect the repository, review `render.yaml`, then create the service. It uses Docker, a Starter service, and a persistent disk mounted at `/var/data`. Check current pricing before deploying.
-3. Create a Supabase project, open **Connect**, choose the **Session pooler** for an IPv4-compatible backend, and copy the full PostgreSQL connection string.
-4. In Render → Environment, set `DATABASE_URL` to that connection string. Keep it private and never commit it. The app creates its PostgreSQL tables during startup.
-5. Set `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use a unique administrator password.
-6. Render generates `SESSION_SECRET` and `APP_ENCRYPTION_KEY`; keep their values safe. Do not rotate `APP_ENCRYPTION_KEY` after saving encrypted user credentials unless you have a migration plan.
-7. Set `APP_URL` to the exact public service origin, for example `https://your-service.onrender.com`.
-8. Configure an AI connection in `/admin` for each user, or set all three shared fallback variables `AI_BASE_URL`, `AI_MODEL_ID`, and `AI_API_KEY`. If neither path is configured for the user, the assistant will return a clear configuration error.
-9. Open `/healthz`. It reports `database: supabase` when `DATABASE_URL` is connected; sign in as administrator and visit `/admin`.
+Requires Node.js 20+. On Termux, install native build prerequisites before npm packages: `pkg install nodejs clang make python pkg-config -y`.
 
-## Manual membership approval
+```bash
+npm install
+cp .env.example .env
+```
 
-Stripe is not required. New accounts are inactive. A user can request activation from the membership page. After verifying payment or authorization separately, the administrator selects that user in `/admin`, chooses a duration in days (default 30), and activates membership. Membership access is checked by the server and expires at the configured end timestamp. The administrator can revoke access immediately. A request is not proof of payment.
+Edit `.env` and set `BOOTSTRAP_ADMIN_EMAIL` and a long `BOOTSTRAP_ADMIN_PASSWORD`. Set a random `APP_ENCRYPTION_KEY` (at least 32 characters; recommended command below) before saving user API keys:
 
-## Local development
+```bash
+openssl rand -hex 32
+```
 
-- Install Node.js 22+, Git, Python 3, and build tools required by `better-sqlite3`.
-- Copy `.env.example` to `.env` and choose either a private `DATABASE_URL` to Supabase or leave it unset for local SQLite development. Never commit `.env`.
-- Run `npm install`, then `npm start`.
-- On first startup with `DATABASE_URL`, the app creates the Supabase tables. If `/var/data/codecraft.sqlite` exists and Supabase has no users yet, it imports the existing users, chat messages, and app settings once during startup.
-- The Docker build installs OpenCode. For local execution outside Docker, install the OpenCode CLI separately.
+Put the output in `APP_ENCRYPTION_KEY`. Then run:
 
-## Operations and security
+```bash
+npm run dev
+```
 
-- Each subscriber gets a private workspace and Unix worker identity. Provider credentials stay in the web process and are injected through a loopback proxy token.
-- User accounts, subscriptions, per-user AI credentials, preferences, chat history, and app settings live in Supabase PostgreSQL when `DATABASE_URL` is set. Project workspaces, OpenCode HOME directories, uploaded files, skills, and exports still live under `DATA_DIR`, so keep the Render persistent disk mounted at `/var/data`. The app is designed for one Render instance; horizontal scaling requires shared workspace storage and a worker/queue design.
-- Unix identities and directory permissions are useful boundaries but are not a complete sandbox. Before opening execution to untrusted public users, add isolated containers/VMs, CPU/memory/process limits, outbound network controls, quotas, abuse monitoring, and security review.
-- The thinking animation is only a progress indicator. Response time is measured locally. Token counts are displayed only when the connected provider reports usage; CodeCraft does not invent missing token data.
+Open the Vite URL shown in the terminal and sign in with the bootstrap admin account. On the first startup, the admin is created only if the email does not already exist. Keep the database and encryption key backed up together; changing the encryption key makes stored provider keys undecryptable.
 
-## Admin API configuration
+## Configure per-user providers
 
-At `/admin`, select a user and enter an HTTPS API base URL, model ID, and API key. The key is encrypted with AES-256-GCM and is never returned to the browser after saving. If a default connection is configured in Render, it is used for accounts without a complete custom connection.
+Open **Admin console → Users & API**, create a user, select them, and assign:
 
-## Admin assistant controls
+- Provider name (display label only)
+- HTTPS base URL (the API's OpenAI-compatible base URL)
+- exact model ID returned/accepted by the provider
+- API key
+- monthly token limit (`0` means unlimited)
 
-The `/admin` page lets the administrator edit the global System Prompt and manage users/API settings. Reasoning controls belong to each subscriber in the chat composer. Saving a changed System Prompt updates persistent app settings and restarts existing workers.
+The provider URL must be HTTPS. The API key is encrypted and then only a masked status is shown. If the customer should pay the provider directly, enter their own provider key. The app meters token usage, but this starter does not yet process in-app monetary payments or create financial invoices.
 
-## Subscriber reasoning controls
+## Configure system prompts per model
 
-Each subscribed user can choose Low, Medium, High, or X-High and independently enable the Thinking Budget. For Gemini 2.5 Pro, these selections map to thinking budgets of 1,024, 8,192, 24,576, and 32,768 tokens respectively. `XHigh` is this application's label for Gemini 2.5 Pro's maximum manual budget, not a Google-defined reasoning-level name. With the toggle off, the proxy asks for dynamic thinking with `thinking_budget=-1`; Gemini 2.5 Pro still reasons internally. The request's HTTP success and whether ODiRouter actually applies the provider-specific field must be checked against a real upstream request.
-## Authentication flow
+Open **Admin console → System prompts**. Save a prompt for the exact model ID, e.g. `provider/model-slug`. Use `*` for the fallback prompt. The server chooses the prompt based on that user's assigned model. Project instructions and repository content are appended as untrusted context and should not be treated as instructions with greater authority.
 
-- Account creation does not automatically sign users in. After successful registration, the UI switches to Sign In, keeps the email, clears the password field, and displays a non-error success notice.
-- Sign-in is handled asynchronously without a full page reload. Users with an active membership go directly to the chat workspace; accounts awaiting manual membership approval remain on the membership screen.
+A system prompt cannot be guaranteed to be followed 100% of the time by a probabilistic model. This implementation gives the administrator prompt system-level placement, adds application guardrails, and independently enforces file/command permissions on the server. Sensitive actions should never rely on prompt text alone.
 
+## Reasoning mode and diagnostics
 
-## User generation preferences and personal skills
+The UI exposes Low / Medium / High / X High separately from Standard / Quick / Long / Deep response modes. For ODiRouter Gemini 2.5 Pro, the app automatically sends `reasoning_effort`; X High maps to High because High is that model's documented ceiling. Deep mode requests a 10,000-token thinking budget. Other routes require a provider-supported mapping in the model prompt editor or environment variables. These settings describe the request, not a guarantee that a gateway honored it.
 
-Each active subscriber can switch manual thinking control on or off and choose Low, Medium, High, or X-High. For Gemini 2.5 Pro, the levels map to explicit thinking budgets (1,024; 8,192; 24,576; and 32,768 tokens); when the toggle is off the request uses Gemini's dynamic/default budget. Gemini 2.5 Pro still performs internal thinking. The app does not expose an answer-length target.
+Go to **Settings & account → Tools & reasoning diagnostics → Run full diagnostics** to test workspace list/read/search/write/delete/task tools and, when a provider is assigned, run live API tests for basic chat, forced function calling, each thinking level, Deep mode, and Long mode. Live tests can consume API quota. Results distinguish failed calls from parameters that were not configured, and show request/usage details where the gateway returns them.
 
-Subscribers can also add up to 20 private OpenCode Skills using a name, description, and instructions. Skills are written to each user's isolated `~/.config/opencode/skills/<skill-id>/SKILL.md`, following OpenCode's skill discovery format, and are not shared with other users.
+The current agent implements these eight tools: `list_files`, `read_file`, `search_files`, `check_code`, `write_file`, `delete_file`, `create_task`, and `run_command`. `check_code` validates native JavaScript syntax and JSON data without executing the source; it does not parse JSX/TypeScript. Write/delete/task/command actions require explicit user approval. `run_command` supports only allowlisted aliases (`build`, `test`, `lint`, `typecheck`, `git-status`, `git-diff-check`) and remains disabled by default; do not enable it on a public deployment until an OS/container sandbox is in place. Web search, MCP server management, LSP diagnostics, parallel subagents, Git worktrees, and plugin lifecycle are not implemented in this build. Diagnostics list those as not implemented rather than pretending they passed.
 
+Long mode requests a maximum of 10,000 output tokens, not a minimum; the provider may cap or reject this parameter. Reasoning token counts are displayed only when returned by the API. A successful HTTP response cannot prove that a gateway did not silently ignore a parameter.
 
-## Generation controls and prompt enforcement
+## Deployment notes
 
-- The administrator System Prompt is loaded from persistent app settings and injected into upstream requests if it was not already included by OpenCode.
-- Existing installations automatically migrate the known previous bundled default prompt to the new default, but any custom administrator prompt is preserved.
-- Per-user Thinking Budget is applied to Gemini 2.5 Pro through `extra_body.google.thinking_config.thinking_budget`. Automatic mode sends `-1`; fixed mode sends the chosen budget.
-- Render logs show a non-sensitive `Generation controls applied` diagnostic. Admin-only `/api/admin/diagnostics` reports the number/names of tool definitions sent, provider HTTP status, and the most recent OpenCode tool names actually executed; it never returns API keys or prompt contents.
+- Set Render build command to `npm install --include=dev && npm run build` and start command to `npm start`.
+- Set `NODE_ENV=production`, admin bootstrap variables, and `APP_ENCRYPTION_KEY` as Render environment variables. After the first successful boot, keep the bootstrap credentials secure; rotate the admin password using an appropriate account-management workflow before public production.
+- Attach a persistent disk at `/var/data` and set `APP_STORAGE_DIR=/var/data`. SQLite and each user workspace are stored below that one mounted directory (`/var/data/data` and `/var/data/workspace`). Without persistent storage, accounts, usage, API configuration, sessions, and workspaces may be lost on restart/redeploy.
+- Do not enable `ENABLE_WORKSPACE_COMMANDS` on a public deployment until commands run inside a proper isolated sandbox with resource limits. Workspace separation alone is not an OS/container sandbox.
+- Before public production, add password reset, admin password rotation UI, stronger external rate limiting, backups/restore testing, monitoring, explicit privacy/retention policy, payment processor integration if charging customers, and a sandbox for command execution.
 
+## Checks
 
-### Supabase TLS troubleshooting
-See `DEPLOY-AR.md` for the verified root-CA setup required when Render logs `self-signed certificate in certificate chain`. The app never disables Node TLS globally.
-
-
-## Supabase TLS on Render
-
-The app requires the Supabase root CA for verified TLS. Download the root certificate in Supabase Database Settings → SSL Configuration, then add a Render Secret File named `supabase-ca.crt`; the app reads `/etc/secrets/supabase-ca.crt` through `SUPABASE_CA_CERT_PATH`. Do not disable TLS verification globally. See `DEPLOY-AR.md` for the full steps.
-
-
-## Deployment diagnostics
-
-On startup the service prints a `CodeCraft runtime identity` line with the Render commit SHA and database TLS mode (no credentials). If it does not appear after redeploy, check Render's branch and Root Directory. OpenCode's runtime provider config passes the per-worker internal token and the resolved System Prompt directly; it does not rely on inline `{env:...}`/`{file:...}` placeholders.
-
-
-## ODiRouter diagnostics and r7 patch
-Recommended ODiRouter base URL: `https://api.odirouter.ai/v1`; do not include `/chat/completions` in the Base URL. Use the exact model ID shown in your account. Admins can select a user and press **Test connection + tools** to run a short text request and a forced tool-call request against the saved user API. This diagnostic uses some model quota and never returns the key.
-
-Release r7 fixes an out-of-scope diagnostic identifier in the provider proxy, clarifies upstream failure logs, and increases token ceilings in the diagnostic probe so the reasoning model has room to return visible text/tool output. Release identity: `odirouter-opencode-proxy-scopefix-20261026-r7`. Local tests do not prove a live ODiRouter route works; use the admin probe after deployment.
+Run `npm run verify` for server syntax checks and offline unit tests for provider parameter mapping. Run `npm run build` after dependencies are installed to test the Vite production build. The offline tests do not contact ODiRouter; live provider verification must be run from the deployed Settings diagnostics page with an API assigned.

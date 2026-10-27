@@ -1,25 +1,32 @@
 {
-  "name": "codecraft-opencode-membership",
-  "version": "1.0.0",
+  "name": "codecraft-ai",
+  "version": "0.4.0",
   "private": true,
-  "description": "Manual-approval coding workspace powered by the OpenCode headless server",
-  "main": "server.js",
+  "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js && node --check generation-controls.js && node --check database-tls.js && node --check public/app.js && node --check public/admin.js",
-    "test": "node --test"
-  },
-  "engines": {
-    "node": ">=22"
+    "dev": "concurrently -k \"npm:server:dev\" \"npm:client:dev\"",
+    "server:dev": "node --watch server/index.js",
+    "client:dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "check": "node --check server/index.js",
+    "test": "node --test tests/*.test.js",
+    "verify": "node --check server/index.js && node --check server/provider-settings.js && node --check server/safe-code-check.js && npm test"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "express-rate-limit": "^7.5.1",
-    "helmet": "^8.1.0",
-    "jsonwebtoken": "^9.0.2",
-    "multer": "^2.0.2",
-    "pg": "^8.16.3"
+    "openai": "^4.86.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "better-sqlite3": "^11.8.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "vite": "^6.1.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
